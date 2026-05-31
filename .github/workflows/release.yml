@@ -47,5 +47,5 @@ jobs:
           name: Release ${{ steps.version.outputs.tag }}
           files: dist/account-inventory-cli.exe
           generate_release_notes: true
-          overwrite_assets: true
+          overwrite_files: true
           make_latest: true
