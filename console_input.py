@@ -68,6 +68,41 @@ def read_command_line(prompt: str = "命令 > ") -> str | None:
             print(key, end="", flush=True)
 
 
+def read_line_or_exit(prompt: str = "") -> str | None:
+    """Read one line. Esc / Q / lone q returns None; empty Enter returns ''."""
+    if not _IS_WINDOWS:
+        line = input(prompt).strip()
+        if line.lower() == "q":
+            return None
+        return line
+
+    if prompt:
+        print(prompt, end="", flush=True)
+    chars: list[str] = []
+    while True:
+        key = read_key()
+        if key == "esc":
+            print()
+            return None
+        if key == "q" and not chars:
+            print()
+            return None
+        if key == "enter":
+            print()
+            result = "".join(chars).strip()
+            if result.lower() == "q":
+                return None
+            return result
+        if key == "backspace":
+            if chars:
+                chars.pop()
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+        elif len(key) == 1 and key not in ("unknown",):
+            chars.append(key)
+            print(key, end="", flush=True)
+
+
 def read_key(timeout: float | None = None) -> str:
     del timeout  # reserved for future use; msvcrt has no timeout API
 

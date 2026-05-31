@@ -516,6 +516,57 @@ def test_console_input_read_key_arrows() -> None:
         assert console_input.read_key() == "down"
 
 
+def test_read_line_or_exit_esc() -> None:
+    with mock.patch.object(console_input, "_IS_WINDOWS", True), mock.patch(
+        "console_input.read_key", return_value="esc"
+    ):
+        assert console_input.read_line_or_exit("prompt: ") is None
+
+
+def test_read_line_or_exit_q() -> None:
+    with mock.patch.object(console_input, "_IS_WINDOWS", True), mock.patch(
+        "console_input.read_key", return_value="q"
+    ):
+        assert console_input.read_line_or_exit("") is None
+
+    with mock.patch.object(console_input, "_IS_WINDOWS", False), mock.patch(
+        "builtins.input", return_value="q"
+    ):
+        assert console_input.read_line_or_exit("> ") is None
+
+    with mock.patch.object(console_input, "_IS_WINDOWS", False), mock.patch(
+        "builtins.input", return_value="hello"
+    ):
+        assert console_input.read_line_or_exit("> ") == "hello"
+
+
+def test_inbound_mode_stays_after_batch() -> None:
+    _reset_inventory()
+    side_effect = ["user1----pass1", "", "user2----pass2", "", None]
+    with mock.patch("console_input.read_line_or_exit", side_effect=side_effect):
+        cli.handle_inbound()
+    assert db.count_inventory() == 2
+
+
+def test_outbound_mode_invalid_then_retry() -> None:
+    _reset_inventory()
+    db.insert_account("u1", "p1")
+    with mock.patch(
+        "console_input.read_line_or_exit", side_effect=["abc", "1", None]
+    ), mock.patch("cli.copy_to_clipboard", return_value=True):
+        cli.handle_outbound()
+    assert db.count_inventory() == 0
+
+
+def test_search_mode_empty_query_retries() -> None:
+    _reset_inventory()
+    db.insert_account("findme", "p")
+    with mock.patch(
+        "console_input.read_line_or_exit", side_effect=["", "findme", None]
+    ):
+        cli.handle_search()
+
+
 def run_all() -> tuple[int, list[str]]:
     failures: list[str] = []
     tests = [
@@ -551,6 +602,11 @@ def run_all() -> tuple[int, list[str]]:
         ("review keyboard esc", test_review_pending_keyboard_esc_exits),
         ("review keyboard y warn", test_review_pending_keyboard_y_without_selection),
         ("console_input arrow keys", test_console_input_read_key_arrows),
+        ("read_line_or_exit esc", test_read_line_or_exit_esc),
+        ("read_line_or_exit q", test_read_line_or_exit_q),
+        ("inbound mode stays after batch", test_inbound_mode_stays_after_batch),
+        ("outbound mode invalid then retry", test_outbound_mode_invalid_then_retry),
+        ("search mode empty query retries", test_search_mode_empty_query_retries),
     ]
     passed = 0
     for name, fn in tests:

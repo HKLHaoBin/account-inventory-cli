@@ -40,16 +40,27 @@ def failure_lines_for_clipboard(failures: list[InboundFailure]) -> str:
     return "\n".join(f.line for f in failures)
 
 
-def _read_inbound_lines() -> list[str]:
+def _print_mode_header(title: str) -> None:
+    print()
+    print(f"========== {title} ==========")
+    print(f"当前库存：{db.count_inventory()}")
+    hint = "Esc/Q 返回首页"
+    if not console_input.keyboard_supported():
+        hint += "（非 Windows 输入 q）"
+    print(hint)
+
+
+def _read_inbound_lines_or_exit() -> list[str] | None:
     print()
     print("请输入账号信息（每行一条，输入空行结束）：")
     lines: list[str] = []
     while True:
-        line = input().strip()
+        line = console_input.read_line_or_exit("")
+        if line is None:
+            return None
         if not line:
-            break
+            return lines
         lines.append(line)
-    return lines
 
 
 def _parse_indices(raw: str, max_index: int) -> list[int]:
@@ -307,11 +318,7 @@ def _copy_failure_lines_to_clipboard(failures: list[InboundFailure]) -> None:
         print("复制失败，请手动复制失败明细中的原始行")
 
 
-def handle_inbound() -> None:
-    lines = _read_inbound_lines()
-    if not lines:
-        return
-
+def _process_inbound_batch(lines: list[str]) -> None:
     parsed_usernames: list[str] = []
     for line in lines:
         try:
@@ -366,91 +373,111 @@ def handle_inbound() -> None:
     _copy_failure_lines_to_clipboard(failures)
 
 
+def handle_inbound() -> None:
+    _print_mode_header("录入模式")
+    while True:
+        lines = _read_inbound_lines_or_exit()
+        if lines is None:
+            break
+        if not lines:
+            continue
+        _process_inbound_batch(lines)
+
+
 def handle_outbound() -> None:
-    inventory = db.count_inventory()
-    if inventory == 0:
-        print("当前无库存，无法出库")
-        return
+    while True:
+        _print_mode_header("出库模式")
+        inventory = db.count_inventory()
+        if inventory == 0:
+            print("当前无库存，无法出库")
+            if console_input.read_line_or_exit("") is None:
+                break
+            continue
 
-    print()
-    print("请输入出库数量（直接回车默认为 1）：", end="", flush=True)
-    raw = input().strip()
-    if not raw:
-        count = 1
-    else:
-        if not raw.isdigit() or int(raw) <= 0:
-            print("无效数量，请输入正整数")
-            return
-        count = int(raw)
-
-    count = min(count, inventory)
-    records = db.outbound_oldest_many(count)
-    if not records:
-        print("当前无库存，无法出库")
-        return
-
-    lines = [
-        format_account(
-            record["username"],
-            record["password"],
-            record["email"],
-            record["email_password"],
-            record["url"],
+        raw = console_input.read_line_or_exit(
+            "请输入出库数量（直接回车默认为 1）："
         )
-        for record in records
-    ]
-    text = "\n".join(lines)
+        if raw is None:
+            break
+        if not raw:
+            count = 1
+        elif not raw.isdigit() or int(raw) <= 0:
+            print("无效数量，请输入正整数")
+            continue
+        else:
+            count = int(raw)
 
-    print()
-    print("出库成功：")
-    for line in lines:
-        print(line)
+        count = min(count, inventory)
+        records = db.outbound_oldest_many(count)
+        if not records:
+            print("当前无库存，无法出库")
+            continue
 
-    if copy_to_clipboard(text):
-        print("已复制到剪贴板")
-    else:
-        print("复制失败，请手动复制")
-    print(f"当前库存：{db.count_inventory()}")
+        lines = [
+            format_account(
+                record["username"],
+                record["password"],
+                record["email"],
+                record["email_password"],
+                record["url"],
+            )
+            for record in records
+        ]
+        text = "\n".join(lines)
+
+        print()
+        print("出库成功：")
+        for line in lines:
+            print(line)
+
+        if copy_to_clipboard(text):
+            print("已复制到剪贴板")
+        else:
+            print("复制失败，请手动复制")
+        print(f"当前库存：{db.count_inventory()}")
 
 
 def handle_search() -> None:
-    print()
-    print("请输入查找字符串（直接回车返回）：", end="", flush=True)
-    query = input().strip()
-    if not query:
-        return
+    while True:
+        _print_mode_header("查找模式")
+        query = console_input.read_line_or_exit("请输入查找字符串：")
+        if query is None:
+            break
+        if not query:
+            print("请输入查找字符串")
+            continue
 
-    inventory_hits = db.search_inventory(query)
-    if inventory_hits:
-        print()
-        print(f"找到 {len(inventory_hits)} 条【库存】：")
-        for record in inventory_hits:
-            line = format_account(
-                record["username"],
-                record["password"],
-                record["email"],
-                record["email_password"],
-                record["url"],
-            )
-            print(f"  【库存】 {line}")
-        return
+        inventory_hits = db.search_inventory(query)
+        if inventory_hits:
+            print()
+            print(f"找到 {len(inventory_hits)} 条【库存】：")
+            for record in inventory_hits:
+                line = format_account(
+                    record["username"],
+                    record["password"],
+                    record["email"],
+                    record["email_password"],
+                    record["url"],
+                )
+                print(f"  【库存】 {line}")
+            continue
 
-    history_hits = db.search_outbound_history(query)
-    if history_hits:
-        print()
-        print(f"找到 {len(history_hits)} 条【出库历史】：")
-        for record in history_hits:
-            line = format_account(
-                record["username"],
-                record["password"],
-                record["email"],
-                record["email_password"],
-                record["url"],
-            )
-            print(f"  【出库历史】 {line}")
-        return
+        history_hits = db.search_outbound_history(query)
+        if history_hits:
+            print()
+            print(f"找到 {len(history_hits)} 条【出库历史】：")
+            for record in history_hits:
+                line = format_account(
+                    record["username"],
+                    record["password"],
+                    record["email"],
+                    record["email_password"],
+                    record["url"],
+                )
+                print(f"  【出库历史】 {line}")
+            continue
 
-    print("未找到匹配的账号")
+        print("未找到匹配的账号")
 
 
 def main_loop() -> None:
