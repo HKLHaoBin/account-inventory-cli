@@ -30,9 +30,8 @@ def render_home(inventory: int) -> None:
     print()
     print("[2] 查找账号（子串匹配，先查库存再查出库历史）")
     print()
-    print("[q] 退出")
+    print("Esc / Ctrl+C 退出")
     print()
-    print("请输入操作：", end="", flush=True)
 
 
 def copy_to_clipboard(text: str) -> bool:
@@ -47,10 +46,7 @@ def _print_mode_header(title: str) -> None:
     print()
     print(f"========== {title} ==========")
     print(f"当前库存：{db.count_inventory()}")
-    hint = "Esc/Q 返回首页"
-    if not console_input.keyboard_supported():
-        hint += "（非 Windows 输入 q）"
-    print(hint)
+    print("Esc 返回首页")
 
 
 def _read_batch_lines_or_exit(prompt: str) -> list[str] | None:
@@ -106,7 +102,7 @@ def _render_pending_interactive(
     lines.extend(
         [
             "",
-            "操作：↑↓ 移动  空格/回车 切换选中  Y 批准选中  N 取消选中  Esc/Q 结束",
+            "操作：↑↓ 移动  空格/回车 切换选中  Y 批准选中  N 取消选中  Esc 结束",
             "命令：按 : 进入命令模式（a/c/a all/done/list）",
         ]
     )
@@ -275,7 +271,7 @@ def _review_pending(pending: list[InboundPending]) -> tuple[int, list[InboundFai
                 )
                 selected.clear()
                 cursor = _clamp_cursor(cursor, len(pending))
-        elif key in ("esc", "q"):
+        elif key == "esc":
             failures.extend(
                 _cancel_pending_items(pending, list(range(len(pending))))
             )
@@ -472,10 +468,7 @@ def handle_entry() -> None:
         print()
         print("========== 录入模式 ==========")
         print(f"当前库存：{db.count_inventory()}")
-        hint = "Esc/Q 返回首页"
-        if not console_input.keyboard_supported():
-            hint += "（非 Windows 输入 q）"
-        print(hint)
+        print("Esc 返回首页")
         print()
         print("[1] 入库录入")
         print("[2] 出库录入")
@@ -613,18 +606,19 @@ def main_loop() -> None:
     try:
         while True:
             render_home(db.count_inventory())
-            command = input().strip().lower()
+            command = console_input.read_command_line("请输入操作：")
+            if command is None:
+                print("再见。")
+                break
+            command = command.lower()
             if command == "0":
                 handle_entry()
             elif command == "1":
                 handle_outbound()
             elif command == "2":
                 handle_search()
-            elif command == "q":
-                print("再见。")
-                break
             else:
-                print("无效命令，请输入 0、1、2 或 q")
+                print("无效命令，请输入 0、1、2")
     except KeyboardInterrupt:
         print()
         print("再见。")

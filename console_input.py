@@ -43,10 +43,43 @@ def kbhit() -> bool:
         return False
 
 
+def _read_line_unix(prompt: str = "") -> str | None:
+    """Read one line on Unix. Esc returns None; Ctrl+C raises KeyboardInterrupt."""
+    import termios
+    import tty
+
+    if prompt:
+        print(prompt, end="", flush=True)
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    chars: list[str] = []
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                print()
+                return None
+            if ch in ("\r", "\n"):
+                print()
+                return "".join(chars).strip()
+            if ch in ("\x08", "\x7f"):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+            elif len(ch) == 1:
+                chars.append(ch)
+                print(ch, end="", flush=True)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 def read_command_line(prompt: str = "命令 > ") -> str | None:
-    """Read a command line. Esc returns None; empty Enter returns ''."""
+    """Read a command line. Esc returns None; Ctrl+C raises KeyboardInterrupt."""
     if not _IS_WINDOWS:
-        return input(prompt).strip()
+        return _read_line_unix(prompt)
 
     print(prompt, end="", flush=True)
     chars: list[str] = []
@@ -69,12 +102,9 @@ def read_command_line(prompt: str = "命令 > ") -> str | None:
 
 
 def read_line_or_exit(prompt: str = "") -> str | None:
-    """Read one line. Esc / Q / lone q returns None; empty Enter returns ''."""
+    """Read one line. Esc returns None; Ctrl+C raises KeyboardInterrupt."""
     if not _IS_WINDOWS:
-        line = input(prompt).strip()
-        if line.lower() == "q":
-            return None
-        return line
+        return _read_line_unix(prompt)
 
     if prompt:
         print(prompt, end="", flush=True)
@@ -84,15 +114,9 @@ def read_line_or_exit(prompt: str = "") -> str | None:
         if key == "esc":
             print()
             return None
-        if key == "q" and not chars:
-            print()
-            return None
         if key == "enter":
             print()
-            result = "".join(chars).strip()
-            if result.lower() == "q":
-                return None
-            return result
+            return "".join(chars).strip()
         if key == "backspace":
             if chars:
                 chars.pop()
@@ -139,6 +163,4 @@ def read_key(timeout: float | None = None) -> str:
         return "n"
     if char == "\x1b":
         return "esc"
-    if char.lower() == "q":
-        return "q"
     return char or "unknown"

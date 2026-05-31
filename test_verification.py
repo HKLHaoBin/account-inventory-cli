@@ -404,7 +404,7 @@ def test_review_pending_keyboard_move_cursor() -> None:
 
     with mock.patch("console_input.enable_vt_mode", return_value=False), mock.patch(
         "console_input.keyboard_supported", return_value=True
-    ), mock.patch("console_input.read_key", side_effect=["down", "q"]):
+    ), mock.patch("console_input.read_key", side_effect=["down", "esc"]):
         cli._review_pending(pending)
 
     assert pending == []
@@ -443,7 +443,7 @@ def test_review_pending_keyboard_y_without_selection() -> None:
 
     with mock.patch("console_input.enable_vt_mode", return_value=False), mock.patch(
         "console_input.keyboard_supported", return_value=True
-    ), mock.patch("console_input.read_key", side_effect=["y", "q"]):
+    ), mock.patch("console_input.read_key", side_effect=["y", "esc"]):
         approved, failures = cli._review_pending(pending)
 
     assert approved == 0
@@ -531,21 +531,28 @@ def test_read_line_or_exit_esc() -> None:
         assert console_input.read_line_or_exit("prompt: ") is None
 
 
-def test_read_line_or_exit_q() -> None:
+def test_read_line_or_exit_q_is_normal_input() -> None:
     with mock.patch.object(console_input, "_IS_WINDOWS", True), mock.patch(
-        "console_input.read_key", return_value="q"
+        "console_input.read_key", side_effect=["q", "enter"]
     ):
+        assert console_input.read_line_or_exit("") == "q"
+
+    with mock.patch.object(console_input, "_IS_WINDOWS", False), mock.patch(
+        "console_input._read_line_unix", return_value="q"
+    ):
+        assert console_input.read_line_or_exit("> ") == "q"
+
+
+def test_read_line_or_exit_unix_esc() -> None:
+    fake_termios = mock.MagicMock()
+    fake_tty = mock.MagicMock()
+    with mock.patch.object(console_input, "_IS_WINDOWS", False), mock.patch.dict(
+        "sys.modules", {"termios": fake_termios, "tty": fake_tty}
+    ), mock.patch("sys.stdin.read", return_value="\x1b"):
+        fake_termios.tcgetattr.return_value = []
         assert console_input.read_line_or_exit("") is None
-
-    with mock.patch.object(console_input, "_IS_WINDOWS", False), mock.patch(
-        "builtins.input", return_value="q"
-    ):
-        assert console_input.read_line_or_exit("> ") is None
-
-    with mock.patch.object(console_input, "_IS_WINDOWS", False), mock.patch(
-        "builtins.input", return_value="hello"
-    ):
-        assert console_input.read_line_or_exit("> ") == "hello"
+        fake_termios.tcsetattr.assert_called()
+        fake_tty.setraw.assert_called()
 
 
 def test_inbound_mode_stays_after_batch() -> None:
@@ -808,7 +815,8 @@ def run_all() -> tuple[int, list[str]]:
         ("review keyboard y warn", test_review_pending_keyboard_y_without_selection),
         ("console_input arrow keys", test_console_input_read_key_arrows),
         ("read_line_or_exit esc", test_read_line_or_exit_esc),
-        ("read_line_or_exit q", test_read_line_or_exit_q),
+        ("read_line_or_exit q is normal input", test_read_line_or_exit_q_is_normal_input),
+        ("read_line_or_exit unix esc", test_read_line_or_exit_unix_esc),
         ("inbound mode stays after batch", test_inbound_mode_stays_after_batch),
         ("outbound mode invalid then retry", test_outbound_mode_invalid_then_retry),
         ("search mode empty query retries", test_search_mode_empty_query_retries),
