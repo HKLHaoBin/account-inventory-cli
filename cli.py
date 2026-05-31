@@ -9,7 +9,10 @@ from batch import (
     InboundFailure,
     InboundPending,
     InboundReady,
+    OutboundFailure,
+    OutboundReady,
     classify_inbound_line,
+    classify_outbound_line,
 )
 from parser import format_account, parse_account_line
 
@@ -19,7 +22,7 @@ def render_home(inventory: int) -> None:
     print("========== 账号出入库管理 ==========")
     print(f"当前库存：{inventory}")
     print()
-    print("[0] 录入账号（支持多行批量，空行结束）")
+    print("[0] 录入账号（入库 / 出库粘贴录入，多行批量，空行结束）")
     print("    格式：账号----密码----邮箱----邮箱密码----网址")
     print("    前两段必填，后三段可选")
     print()
@@ -36,7 +39,7 @@ def copy_to_clipboard(text: str) -> bool:
     return clipboard.copy_text(text)
 
 
-def failure_lines_for_clipboard(failures: list[InboundFailure]) -> str:
+def failure_lines_for_clipboard(failures: list[InboundFailure | OutboundFailure]) -> str:
     return "\n".join(f.line for f in failures)
 
 
@@ -50,9 +53,9 @@ def _print_mode_header(title: str) -> None:
     print(hint)
 
 
-def _read_inbound_lines_or_exit() -> list[str] | None:
+def _read_batch_lines_or_exit(prompt: str) -> list[str] | None:
     print()
-    print("请输入账号信息（每行一条，输入空行结束）：")
+    print(prompt)
     lines: list[str] = []
     while True:
         line = console_input.read_line_or_exit("")
@@ -308,7 +311,9 @@ def _print_inbound_summary(success_count: int, failures: list[InboundFailure]) -
             print(f"     {failure.line}")
 
 
-def _copy_failure_lines_to_clipboard(failures: list[InboundFailure]) -> None:
+def _copy_failure_lines_to_clipboard(
+    failures: list[InboundFailure | OutboundFailure],
+) -> None:
     if not failures:
         return
     text = failure_lines_for_clipboard(failures)
@@ -373,15 +378,121 @@ def _process_inbound_batch(lines: list[str]) -> None:
     _copy_failure_lines_to_clipboard(failures)
 
 
+def _print_outbound_summary(success_count: int, failures: list[OutboundFailure]) -> None:
+    print()
+    print(f"批量出库完成：成功 {success_count} 条，失败 {len(failures)} 条")
+    print(f"当前库存：{db.count_inventory()}")
+    if failures:
+        print()
+        print("失败明细：")
+        for i, failure in enumerate(failures, start=1):
+            print(f"  {i}. [{failure.reason}]")
+            print(f"     {failure.line}")
+
+
+def _process_outbound_batch(lines: list[str]) -> None:
+    parsed_usernames: list[str] = []
+    for line in lines:
+        try:
+            username, _, _, _, _ = parse_account_line(line)
+            parsed_usernames.append(username)
+        except ValueError:
+            continue
+
+    inventory_exists = db.exists_in_inventory_many(parsed_usernames)
+    outbound_exists = db.exists_in_outbound_many(parsed_usernames)
+
+    def exists_in_inventory(username: str) -> bool:
+        return username in inventory_exists
+
+    def exists_in_outbound(username: str) -> bool:
+        return username in outbound_exists
+
+    seen_usernames: set[str] = set()
+    failures: list[OutboundFailure] = []
+    success_count = 0
+
+    for line in lines:
+        result = classify_outbound_line(
+            line,
+            seen_usernames,
+            exists_in_inventory=exists_in_inventory,
+            exists_in_outbound=exists_in_outbound,
+        )
+        if isinstance(result, OutboundFailure):
+            failures.append(result)
+        elif isinstance(result, OutboundReady):
+            if exists_in_inventory(result.username):
+                db.outbound_by_username(result.username)
+            else:
+                db.insert_outbound_record(
+                    result.username,
+                    result.password,
+                    result.email,
+                    result.email_password,
+                    result.url,
+                )
+            seen_usernames.add(result.username)
+            inventory_exists.discard(result.username)
+            outbound_exists.add(result.username)
+            success_count += 1
+
+    _print_outbound_summary(success_count, failures)
+    _copy_failure_lines_to_clipboard(failures)
+
+
 def handle_inbound() -> None:
-    _print_mode_header("录入模式")
+    _print_mode_header("入库录入")
     while True:
-        lines = _read_inbound_lines_or_exit()
+        lines = _read_batch_lines_or_exit(
+            "请输入账号信息（每行一条，输入空行结束）："
+        )
         if lines is None:
             break
         if not lines:
             continue
         _process_inbound_batch(lines)
+
+
+def handle_outbound_paste() -> None:
+    _print_mode_header("出库录入")
+    while True:
+        lines = _read_batch_lines_or_exit(
+            "请输入出库账号信息（每行一条，输入空行结束）："
+        )
+        if lines is None:
+            break
+        if not lines:
+            continue
+        _process_outbound_batch(lines)
+
+
+def handle_entry() -> None:
+    while True:
+        print()
+        print("========== 录入模式 ==========")
+        print(f"当前库存：{db.count_inventory()}")
+        hint = "Esc/Q 返回首页"
+        if not console_input.keyboard_supported():
+            hint += "（非 Windows 输入 q）"
+        print(hint)
+        print()
+        print("[1] 入库录入")
+        print("[2] 出库录入")
+        print()
+        print("请选择录入类型：", end="", flush=True)
+        choice = console_input.read_line_or_exit("")
+        if choice is None:
+            break
+        choice = choice.strip()
+        if choice == "1":
+            handle_inbound()
+            break
+        if choice == "2":
+            handle_outbound_paste()
+            break
+        if choice:
+            print("无效选项，请输入 1 或 2")
 
 
 def _print_outbound_success(records: list[dict]) -> None:
@@ -504,7 +615,7 @@ def main_loop() -> None:
             render_home(db.count_inventory())
             command = input().strip().lower()
             if command == "0":
-                handle_inbound()
+                handle_entry()
             elif command == "1":
                 handle_outbound()
             elif command == "2":

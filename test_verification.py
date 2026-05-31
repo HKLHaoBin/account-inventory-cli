@@ -17,7 +17,15 @@ import cli
 import clipboard
 import console_input
 import database as db
-from batch import InboundFailure, InboundPending, InboundReady, classify_inbound_line
+from batch import (
+    InboundFailure,
+    InboundPending,
+    InboundReady,
+    OutboundFailure,
+    OutboundReady,
+    classify_inbound_line,
+    classify_outbound_line,
+)
 from parser import format_account, parse_account_line
 
 
@@ -642,6 +650,128 @@ def test_search_multiple_inventory_no_outbound_prompt() -> None:
     assert db.count_inventory() == 2
 
 
+def test_classify_outbound_line_in_inventory() -> None:
+    _reset_inventory()
+    db.insert_account("stock", "p1")
+    seen: set[str] = set()
+    result = classify_outbound_line(
+        "stock----p1",
+        seen,
+        exists_in_inventory=db.exists_in_inventory,
+        exists_in_outbound=db.exists_in_outbound,
+    )
+    assert isinstance(result, OutboundReady)
+    assert result.username == "stock"
+
+
+def test_classify_outbound_line_not_in_inventory() -> None:
+    _reset_inventory()
+    seen: set[str] = set()
+    result = classify_outbound_line(
+        "new----p1",
+        seen,
+        exists_in_inventory=db.exists_in_inventory,
+        exists_in_outbound=db.exists_in_outbound,
+    )
+    assert isinstance(result, OutboundReady)
+    assert result.username == "new"
+
+
+def test_classify_outbound_line_already_outbound() -> None:
+    _reset_inventory()
+    db.insert_account("gone", "p1")
+    db.outbound_oldest()
+    seen: set[str] = set()
+    result = classify_outbound_line(
+        "gone----p1",
+        seen,
+        exists_in_inventory=db.exists_in_inventory,
+        exists_in_outbound=db.exists_in_outbound,
+    )
+    assert isinstance(result, OutboundFailure)
+    assert result.reason == "已在出库记录中"
+
+
+def test_classify_outbound_line_reinbound_ready() -> None:
+    _reset_inventory()
+    db.insert_account("rein", "old")
+    db.outbound_oldest()
+    db.insert_account("rein", "new")
+    seen: set[str] = set()
+    result = classify_outbound_line(
+        "rein----new",
+        seen,
+        exists_in_inventory=db.exists_in_inventory,
+        exists_in_outbound=db.exists_in_outbound,
+    )
+    assert isinstance(result, OutboundReady)
+
+
+def test_classify_outbound_line_batch_duplicate() -> None:
+    _reset_inventory()
+    seen: set[str] = {"dup"}
+    result = classify_outbound_line(
+        "dup----p2",
+        seen,
+        exists_in_inventory=db.exists_in_inventory,
+        exists_in_outbound=db.exists_in_outbound,
+    )
+    assert isinstance(result, OutboundFailure)
+    assert result.reason == "本批次内账号重复"
+
+
+def test_insert_outbound_record() -> None:
+    _reset_inventory()
+    before = db.count_outbound_records()
+    db.insert_outbound_record("direct", "pw", email="e@x.com")
+    assert db.count_outbound_records() == before + 1
+    assert db.exists_in_outbound("direct")
+    assert not db.exists_in_inventory("direct")
+
+
+def test_process_outbound_batch_mixed() -> None:
+    _reset_inventory()
+    db.insert_account("in_stock", "p1")
+    db.insert_account("gone", "p2")
+    db.outbound_by_username("gone")
+
+    lines = [
+        "in_stock----p1",
+        "direct----pw",
+        "gone----p2",
+        "bad-line",
+    ]
+    with mock.patch("cli.copy_to_clipboard", return_value=True):
+        cli._process_outbound_batch(lines)
+
+    assert not db.exists_in_inventory("in_stock")
+    assert db.exists_in_outbound("in_stock")
+    assert db.exists_in_outbound("direct")
+    assert db.count_outbound_records() == 3
+
+
+def test_outbound_paste_mode_stays_after_batch() -> None:
+    _reset_inventory()
+    db.insert_account("u1", "p1")
+    side_effect = ["u1----p1", "", "direct----pw", "", None]
+    with mock.patch("console_input.read_line_or_exit", side_effect=side_effect), mock.patch(
+        "cli.copy_to_clipboard", return_value=True
+    ):
+        cli.handle_outbound_paste()
+    assert db.count_inventory() == 0
+    assert db.exists_in_outbound("direct")
+
+
+def test_handle_entry_outbound_paste() -> None:
+    _reset_inventory()
+    side_effect = ["2", "new----pw", "", None]
+    with mock.patch("console_input.read_line_or_exit", side_effect=side_effect), mock.patch(
+        "cli.copy_to_clipboard", return_value=True
+    ):
+        cli.handle_entry()
+    assert db.exists_in_outbound("new")
+
+
 def run_all() -> tuple[int, list[str]]:
     failures: list[str] = []
     tests = [
@@ -685,6 +815,15 @@ def run_all() -> tuple[int, list[str]]:
         ("outbound by username", test_outbound_by_username),
         ("search single inventory outbound", test_search_single_inventory_offers_outbound),
         ("search multiple no outbound prompt", test_search_multiple_inventory_no_outbound_prompt),
+        ("classify outbound in inventory", test_classify_outbound_line_in_inventory),
+        ("classify outbound not in inventory", test_classify_outbound_line_not_in_inventory),
+        ("classify outbound already outbound", test_classify_outbound_line_already_outbound),
+        ("classify outbound re-inbound ready", test_classify_outbound_line_reinbound_ready),
+        ("classify outbound batch duplicate", test_classify_outbound_line_batch_duplicate),
+        ("insert_outbound_record", test_insert_outbound_record),
+        ("process outbound batch mixed", test_process_outbound_batch_mixed),
+        ("outbound paste mode stays after batch", test_outbound_paste_mode_stays_after_batch),
+        ("handle entry outbound paste", test_handle_entry_outbound_paste),
     ]
     passed = 0
     for name, fn in tests:

@@ -76,3 +76,47 @@ def classify_inbound_line(
         email_password=email_password,
         url=url,
     )
+
+
+@dataclass(frozen=True)
+class OutboundFailure:
+    line: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class OutboundReady:
+    line: str
+    username: str
+    password: str
+    email: str | None = None
+    email_password: str | None = None
+    url: str | None = None
+
+
+def classify_outbound_line(
+    line: str,
+    seen_usernames: set[str],
+    *,
+    exists_in_inventory: Callable[[str], bool],
+    exists_in_outbound: Callable[[str], bool],
+) -> OutboundReady | OutboundFailure:
+    try:
+        username, password, email, email_password, url = parse_account_line(line)
+    except ValueError as exc:
+        return OutboundFailure(line=line, reason=str(exc))
+
+    if username in seen_usernames:
+        return OutboundFailure(line=line, reason="本批次内账号重复")
+
+    if exists_in_outbound(username) and not exists_in_inventory(username):
+        return OutboundFailure(line=line, reason="已在出库记录中")
+
+    return OutboundReady(
+        line=line,
+        username=username,
+        password=password,
+        email=email,
+        email_password=email_password,
+        url=url,
+    )

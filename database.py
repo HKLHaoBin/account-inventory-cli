@@ -324,6 +324,25 @@ def outbound_by_username(username: str) -> dict[str, Any] | None:
         }
 
 
+def insert_outbound_record(
+    username: str,
+    password: str,
+    email: str | None = None,
+    email_password: str | None = None,
+    url: str | None = None,
+) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO outbound_records (
+                username, password, email, email_password, url, inbound_at
+            )
+            VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            """,
+            (username, password, email, email_password, url),
+        )
+
+
 def count_outbound_records() -> int:
     """Helper for tests."""
     with _connect() as conn:
