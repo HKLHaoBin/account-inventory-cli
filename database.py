@@ -81,18 +81,55 @@ def exists_in_outbound(username: str) -> bool:
 
 
 def get_latest_outbound_time(username: str) -> str | None:
+    times = get_latest_outbound_times([username])
+    return times.get(username)
+
+
+def get_latest_outbound_times(usernames: list[str]) -> dict[str, str]:
+    if not usernames:
+        return {}
+
+    unique = list(dict.fromkeys(usernames))
+    placeholders = ",".join("?" * len(unique))
     with _connect() as conn:
-        row = conn.execute(
-            """
-            SELECT outbound_at
+        rows = conn.execute(
+            f"""
+            SELECT username, MAX(outbound_at) AS outbound_at
             FROM outbound_records
-            WHERE username = ?
-            ORDER BY outbound_at DESC, id DESC
-            LIMIT 1
+            WHERE username IN ({placeholders})
+            GROUP BY username
             """,
-            (username,),
-        ).fetchone()
-        return row["outbound_at"] if row else None
+            unique,
+        ).fetchall()
+    return {row["username"]: row["outbound_at"] for row in rows}
+
+
+def exists_in_inventory_many(usernames: list[str]) -> set[str]:
+    if not usernames:
+        return set()
+
+    unique = list(dict.fromkeys(usernames))
+    placeholders = ",".join("?" * len(unique))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT username FROM accounts WHERE username IN ({placeholders})",
+            unique,
+        ).fetchall()
+    return {row["username"] for row in rows}
+
+
+def exists_in_outbound_many(usernames: list[str]) -> set[str]:
+    if not usernames:
+        return set()
+
+    unique = list(dict.fromkeys(usernames))
+    placeholders = ",".join("?" * len(unique))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT username FROM outbound_records WHERE username IN ({placeholders})",
+            unique,
+        ).fetchall()
+    return {row["username"] for row in rows}
 
 
 def insert_account(

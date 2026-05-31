@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import clipboard
+import console_input
 import database as db
 from batch import (
     InboundFailure,
@@ -9,7 +11,7 @@ from batch import (
     InboundReady,
     classify_inbound_line,
 )
-from parser import format_account
+from parser import format_account, parse_account_line
 
 
 def render_home(inventory: int) -> None:
@@ -29,18 +31,7 @@ def render_home(inventory: int) -> None:
 
 
 def copy_to_clipboard(text: str) -> bool:
-    try:
-        import tkinter as tk
-
-        root = tk.Tk()
-        root.withdraw()
-        root.clipboard_clear()
-        root.clipboard_append(text)
-        root.update()
-        root.destroy()
-        return True
-    except Exception:
-        return False
+    return clipboard.copy_text(text)
 
 
 def _read_inbound_lines() -> list[str]:
@@ -66,98 +57,223 @@ def _parse_indices(raw: str, max_index: int) -> list[int]:
     return indices
 
 
-def _print_pending_list(pending: list[InboundPending]) -> None:
-    print()
-    print(f"以下 {len(pending)} 个账号曾出现在出库记录中，需确认是否入库：")
-    for i, item in enumerate(pending, start=1):
-        latest = db.get_latest_outbound_time(item.username)
+def _clamp_cursor(cursor: int, pending_len: int) -> int:
+    if pending_len <= 0:
+        return 0
+    return max(0, min(cursor, pending_len - 1))
+
+
+def _render_pending_interactive(
+    pending: list[InboundPending],
+    cursor: int,
+    selected: set[int],
+    outbound_times: dict[str, str],
+    *,
+    vt_enabled: bool,
+    message: str = "",
+) -> None:
+    lines: list[str] = [
+        "",
+        f"以下 {len(pending)} 个账号曾出现在出库记录中，需确认是否入库：",
+        "",
+    ]
+    for i, item in enumerate(pending):
+        marker = ">" if i == cursor else " "
+        check = "[x]" if i in selected else "[ ]"
+        latest = outbound_times.get(item.username)
         time_hint = f"（最近出库：{latest}）" if latest else ""
-        print(f"  [{i}] {item.username}  {time_hint}")
-    print()
-    print("命令：")
-    print("  a <序号>     批准选中条目入库（如 a 1,3 或 a 1 3）")
-    print("  c <序号>     取消选中条目（如 c 2）")
-    print("  a all        批准全部待确认条目")
-    print("  done         结束确认（未处理条目视为取消）")
-    print("  list         重新显示列表")
-    print()
+        lines.append(f"  {marker} {check} {item.username}  {time_hint}")
+    lines.extend(
+        [
+            "",
+            "操作：↑↓ 移动  空格/回车 切换选中  Y 批准选中  N 取消选中  Esc/Q 结束",
+            "命令：按 : 进入命令模式（a/c/a all/done/list）",
+        ]
+    )
+    if message:
+        lines.append(message)
+    lines.append("")
+
+    output = "\n".join(lines)
+    if vt_enabled:
+        print("\033[H\033[J", end="")
+    print(output, end="", flush=True)
+
+
+def _approve_pending_items(
+    pending: list[InboundPending],
+    indices: list[int],
+) -> int:
+    count = 0
+    for idx in sorted(indices, reverse=True):
+        item = pending[idx]
+        db.insert_account(
+            item.username,
+            item.password,
+            item.email,
+            item.email_password,
+        )
+        count += 1
+        pending.pop(idx)
+    return count
+
+
+def _cancel_pending_items(
+    pending: list[InboundPending],
+    indices: list[int],
+) -> list[InboundFailure]:
+    cancelled: list[InboundFailure] = []
+    for idx in sorted(indices, reverse=True):
+        item = pending[idx]
+        cancelled.append(
+            InboundFailure(
+                line=item.line,
+                reason="用户取消录入（曾出现在出库记录）",
+            )
+        )
+        pending.pop(idx)
+    return cancelled
+
+
+def _execute_pending_command(
+    command: str,
+    pending: list[InboundPending],
+    selected: set[int],
+    *,
+    success_count: int,
+    failures: list[InboundFailure],
+) -> tuple[int, str, bool]:
+    if not command:
+        return success_count, "", False
+
+    parts = command.split(maxsplit=1)
+    action = parts[0].lower()
+    args = parts[1] if len(parts) > 1 else ""
+
+    if action == "list":
+        return success_count, "", False
+
+    if action == "done":
+        failures.extend(
+            _cancel_pending_items(pending, list(range(len(pending))))
+        )
+        pending.clear()
+        return success_count, "", True
+
+    if action == "a" and args.lower() == "all":
+        success_count += _approve_pending_items(
+            pending, list(range(len(pending)))
+        )
+        pending.clear()
+        return success_count, "", True
+
+    if action == "a":
+        indices = _parse_indices(args, len(pending))
+        if not indices:
+            return success_count, "未识别有效序号，请重试。", False
+        success_count += _approve_pending_items(
+            pending, [idx - 1 for idx in indices]
+        )
+        selected.clear()
+        return success_count, "", False
+
+    if action == "c":
+        indices = _parse_indices(args, len(pending))
+        if not indices:
+            return success_count, "未识别有效序号，请重试。", False
+        failures.extend(
+            _cancel_pending_items(pending, [idx - 1 for idx in indices])
+        )
+        selected.clear()
+        return success_count, "", False
+
+    return success_count, "无效命令，请输入 a / c / a all / done / list", False
 
 
 def _review_pending(pending: list[InboundPending]) -> tuple[int, list[InboundFailure]]:
     success_count = 0
     failures: list[InboundFailure] = []
+    cursor = 0
+    selected: set[int] = set()
+    vt_enabled = console_input.enable_vt_mode()
+    message = ""
+    keyboard = console_input.keyboard_supported()
 
     while pending:
-        _print_pending_list(pending)
-        print("确认 > ", end="", flush=True)
-        command = input().strip()
-        if not command:
+        outbound_times = db.get_latest_outbound_times([item.username for item in pending])
+        _render_pending_interactive(
+            pending,
+            cursor,
+            selected,
+            outbound_times,
+            vt_enabled=vt_enabled,
+            message=message,
+        )
+        message = ""
+
+        if not keyboard:
+            print("命令 > ", end="", flush=True)
+            command = input().strip()
+            success_count, message, done = _execute_pending_command(
+                command,
+                pending,
+                selected,
+                success_count=success_count,
+                failures=failures,
+            )
+            cursor = _clamp_cursor(cursor, len(pending))
+            if done:
+                break
             continue
 
-        parts = command.split(maxsplit=1)
-        action = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
-
-        if action == "list":
-            continue
-
-        if action == "done":
-            for item in pending:
-                failures.append(
-                    InboundFailure(
-                        line=item.line,
-                        reason="用户取消录入（曾出现在出库记录）",
-                    )
+        key = console_input.read_key()
+        if key == "up":
+            cursor = (cursor - 1) % len(pending)
+        elif key == "down":
+            cursor = (cursor + 1) % len(pending)
+        elif key in ("space", "enter"):
+            if cursor in selected:
+                selected.discard(cursor)
+            else:
+                selected.add(cursor)
+        elif key == "y":
+            if not selected:
+                message = "请先选中条目"
+            else:
+                success_count += _approve_pending_items(
+                    pending, sorted(selected)
                 )
+                selected.clear()
+                cursor = _clamp_cursor(cursor, len(pending))
+        elif key == "n":
+            if not selected:
+                message = "请先选中条目"
+            else:
+                failures.extend(
+                    _cancel_pending_items(pending, sorted(selected))
+                )
+                selected.clear()
+                cursor = _clamp_cursor(cursor, len(pending))
+        elif key in ("esc", "q"):
+            failures.extend(
+                _cancel_pending_items(pending, list(range(len(pending))))
+            )
             pending.clear()
             break
-
-        if action == "a" and args.lower() == "all":
-            for item in list(pending):
-                db.insert_account(
-                    item.username,
-                    item.password,
-                    item.email,
-                    item.email_password,
-                )
-                success_count += 1
-            pending.clear()
-            break
-
-        if action == "a":
-            indices = _parse_indices(args, len(pending))
-            if not indices:
-                print("未识别有效序号，请重试。")
+        elif key == ":":
+            command = console_input.read_command_line("命令 > ")
+            if command is None:
                 continue
-            for idx in sorted(indices, reverse=True):
-                item = pending[idx - 1]
-                db.insert_account(
-                    item.username,
-                    item.password,
-                    item.email,
-                    item.email_password,
-                )
-                success_count += 1
-                pending.pop(idx - 1)
-            continue
-
-        if action == "c":
-            indices = _parse_indices(args, len(pending))
-            if not indices:
-                print("未识别有效序号，请重试。")
-                continue
-            for idx in sorted(indices, reverse=True):
-                item = pending[idx - 1]
-                failures.append(
-                    InboundFailure(
-                        line=item.line,
-                        reason="用户取消录入（曾出现在出库记录）",
-                    )
-                )
-                pending.pop(idx - 1)
-            continue
-
-        print("无效命令，请输入 a / c / a all / done / list")
+            success_count, message, done = _execute_pending_command(
+                command,
+                pending,
+                selected,
+                success_count=success_count,
+                failures=failures,
+            )
+            cursor = _clamp_cursor(cursor, len(pending))
+            if done:
+                break
 
     return success_count, failures
 
@@ -179,6 +295,23 @@ def handle_inbound() -> None:
     if not lines:
         return
 
+    parsed_usernames: list[str] = []
+    for line in lines:
+        try:
+            username, _, _, _ = parse_account_line(line)
+            parsed_usernames.append(username)
+        except ValueError:
+            continue
+
+    inventory_exists = db.exists_in_inventory_many(parsed_usernames)
+    outbound_exists = db.exists_in_outbound_many(parsed_usernames)
+
+    def exists_in_inventory(username: str) -> bool:
+        return username in inventory_exists
+
+    def exists_in_outbound(username: str) -> bool:
+        return username in outbound_exists
+
     seen_usernames: set[str] = set()
     pending: list[InboundPending] = []
     failures: list[InboundFailure] = []
@@ -188,8 +321,8 @@ def handle_inbound() -> None:
         result = classify_inbound_line(
             line,
             seen_usernames,
-            exists_in_inventory=db.exists_in_inventory,
-            exists_in_outbound=db.exists_in_outbound,
+            exists_in_inventory=exists_in_inventory,
+            exists_in_outbound=exists_in_outbound,
         )
         if isinstance(result, InboundFailure):
             failures.append(result)
@@ -203,6 +336,7 @@ def handle_inbound() -> None:
                 result.email_password,
             )
             seen_usernames.add(result.username)
+            inventory_exists.add(result.username)
             success_count += 1
 
     if pending:

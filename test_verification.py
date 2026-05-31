@@ -14,6 +14,8 @@ sys.path.insert(0, str(ROOT))
 
 import batch
 import cli
+import clipboard
+import console_input
 import database as db
 from batch import InboundFailure, InboundPending, InboundReady, classify_inbound_line
 from parser import format_account, parse_account_line
@@ -241,6 +243,55 @@ def test_outbound_oldest_many_zero() -> None:
     assert db.count_inventory() == 1
 
 
+def _make_pending(username: str, password: str = "newpass") -> InboundPending:
+    return InboundPending(
+        line=f"{username}----{password}",
+        username=username,
+        password=password,
+    )
+
+
+def test_get_latest_outbound_times_batch() -> None:
+    _reset_inventory()
+    db.insert_account("u1", "p1")
+    db.insert_account("u2", "p2")
+    db.outbound_oldest_many(2)
+
+    times = db.get_latest_outbound_times(["u1", "u2", "missing"])
+    assert set(times.keys()) == {"u1", "u2"}
+    assert times["u1"] is not None
+    assert times["u2"] is not None
+    assert "missing" not in times
+    assert db.get_latest_outbound_time("u1") == times["u1"]
+
+
+def test_exists_many_batch() -> None:
+    _reset_inventory()
+    db.insert_account("was_out", "p")
+    db.outbound_oldest()
+    db.insert_account("in_stock", "p")
+
+    inventory = db.exists_in_inventory_many(["in_stock", "was_out", "none"])
+    outbound = db.exists_in_outbound_many(["in_stock", "was_out", "none"])
+    assert inventory == {"in_stock"}
+    assert outbound == {"was_out"}
+
+
+def test_clipboard_copy_text() -> None:
+    with mock.patch("clipboard._copy_text_win32", return_value=True):
+        assert clipboard.copy_text("hello") is True
+
+    with mock.patch("clipboard._copy_text_win32", return_value=False), mock.patch(
+        "clipboard._copy_text_tk", return_value=True
+    ):
+        assert clipboard.copy_text("fallback") is True
+
+    with mock.patch("clipboard._copy_text_win32", return_value=False), mock.patch(
+        "clipboard._copy_text_tk", return_value=False
+    ):
+        assert clipboard.copy_text("fail") is False
+
+
 def test_batch_inbound_pending_approve() -> None:
     _reset_inventory()
     db.insert_account("hist", "old")
@@ -257,7 +308,9 @@ def test_batch_inbound_pending_approve() -> None:
     assert isinstance(result, InboundPending)
 
     pending = [result]
-    with mock.patch("builtins.input", side_effect=["a 1"]):
+    with mock.patch("console_input.keyboard_supported", return_value=True), mock.patch(
+        "console_input.read_key", return_value=":"
+    ), mock.patch("console_input.read_command_line", return_value="a 1"):
         approved, failures = cli._review_pending(pending)
     assert approved == 1
     assert failures == []
@@ -280,12 +333,92 @@ def test_batch_inbound_pending_cancel() -> None:
     assert isinstance(result, InboundPending)
 
     pending = [result]
-    with mock.patch("builtins.input", side_effect=["c 1"]):
+    with mock.patch("console_input.keyboard_supported", return_value=True), mock.patch(
+        "console_input.read_key", return_value=":"
+    ), mock.patch("console_input.read_command_line", return_value="c 1"):
         approved, failures = cli._review_pending(pending)
     assert approved == 0
     assert len(failures) == 1
     assert failures[0].reason == "用户取消录入（曾出现在出库记录）"
     assert not db.exists_in_inventory("hist2")
+
+
+def test_review_pending_keyboard_toggle_and_approve() -> None:
+    _reset_inventory()
+    pending = [_make_pending("kb1")]
+
+    with mock.patch("console_input.enable_vt_mode", return_value=False), mock.patch(
+        "console_input.keyboard_supported", return_value=True
+    ), mock.patch("console_input.read_key", side_effect=["space", "y"]):
+        approved, failures = cli._review_pending(pending)
+
+    assert approved == 1
+    assert failures == []
+    assert db.count_inventory() == 1
+    assert db.exists_in_inventory("kb1")
+
+
+def test_review_pending_keyboard_move_cursor() -> None:
+    _reset_inventory()
+    pending = [_make_pending("move1"), _make_pending("move2")]
+
+    with mock.patch("console_input.enable_vt_mode", return_value=False), mock.patch(
+        "console_input.keyboard_supported", return_value=True
+    ), mock.patch("console_input.read_key", side_effect=["down", "q"]):
+        cli._review_pending(pending)
+
+    assert pending == []
+
+
+def test_review_pending_keyboard_cancel_selected() -> None:
+    _reset_inventory()
+    pending = [_make_pending("nc1")]
+
+    with mock.patch("console_input.enable_vt_mode", return_value=False), mock.patch(
+        "console_input.keyboard_supported", return_value=True
+    ), mock.patch("console_input.read_key", side_effect=["space", "n"]):
+        approved, failures = cli._review_pending(pending)
+
+    assert approved == 0
+    assert len(failures) == 1
+    assert failures[0].reason == "用户取消录入（曾出现在出库记录）"
+
+
+def test_review_pending_keyboard_esc_exits() -> None:
+    _reset_inventory()
+    pending = [_make_pending("esc1"), _make_pending("esc2")]
+
+    with mock.patch("console_input.enable_vt_mode", return_value=False), mock.patch(
+        "console_input.keyboard_supported", return_value=True
+    ), mock.patch("console_input.read_key", return_value="esc"):
+        approved, failures = cli._review_pending(pending)
+
+    assert approved == 0
+    assert len(failures) == 2
+
+
+def test_review_pending_keyboard_y_without_selection() -> None:
+    _reset_inventory()
+    pending = [_make_pending("warn1")]
+
+    with mock.patch("console_input.enable_vt_mode", return_value=False), mock.patch(
+        "console_input.keyboard_supported", return_value=True
+    ), mock.patch("console_input.read_key", side_effect=["y", "q"]):
+        approved, failures = cli._review_pending(pending)
+
+    assert approved == 0
+    assert len(failures) == 1
+
+
+def test_console_input_read_key_arrows() -> None:
+    if sys.platform != "win32":
+        assert console_input.kbhit() is False
+        return
+
+    with mock.patch("msvcrt.getch", side_effect=[b"\xe0", b"H"]):
+        assert console_input.read_key() == "up"
+    with mock.patch("msvcrt.getch", side_effect=[b"\x00", b"P"]):
+        assert console_input.read_key() == "down"
 
 
 def run_all() -> tuple[int, list[str]]:
@@ -307,8 +440,17 @@ def run_all() -> tuple[int, list[str]]:
         ("batch outbound FIFO 2", test_batch_outbound_fifo_two),
         ("batch outbound exceeds inventory", test_batch_outbound_exceeds_inventory),
         ("outbound_oldest_many(0)", test_outbound_oldest_many_zero),
+        ("get_latest_outbound_times batch", test_get_latest_outbound_times_batch),
+        ("exists many batch", test_exists_many_batch),
+        ("clipboard copy_text", test_clipboard_copy_text),
         ("batch pending approve", test_batch_inbound_pending_approve),
         ("batch pending cancel", test_batch_inbound_pending_cancel),
+        ("review keyboard approve", test_review_pending_keyboard_toggle_and_approve),
+        ("review keyboard move", test_review_pending_keyboard_move_cursor),
+        ("review keyboard cancel", test_review_pending_keyboard_cancel_selected),
+        ("review keyboard esc", test_review_pending_keyboard_esc_exits),
+        ("review keyboard y warn", test_review_pending_keyboard_y_without_selection),
+        ("console_input arrow keys", test_console_input_read_key_arrows),
     ]
     passed = 0
     for name, fn in tests:
