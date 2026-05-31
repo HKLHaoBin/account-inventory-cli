@@ -1,6 +1,20 @@
-# 账号出入库管理
+# account-inventory-cli
+
+> 账号出入库管理 — A Python CLI for account inventory management.
 
 命令行工具，用于管理账号库存：录入账号、按先进先出（FIFO）出库，并将出库内容自动复制到剪贴板。
+
+## 克隆
+
+```bash
+git clone https://github.com/HKLHaoBin/account-inventory-cli.git
+cd account-inventory-cli
+python main.py
+```
+
+## 许可证
+
+本项目采用 [GNU General Public License v3.0](LICENSE)（GPL-3.0）发布。
 
 ## 功能
 
