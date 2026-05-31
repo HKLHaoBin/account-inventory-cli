@@ -41,8 +41,8 @@ def test_scenario_1_initial_inventory_zero() -> None:
 
 
 def test_scenario_2_inventory_duplicate_blocked() -> None:
-    u, p, e, ep = parse_account_line("a----b")
-    db.insert_account(u, p, e, ep)
+    u, p, e, ep, url = parse_account_line("a----b")
+    db.insert_account(u, p, e, ep, url)
     assert db.count_inventory() == 1
     assert db.exists_in_inventory("a")
     try:
@@ -54,8 +54,8 @@ def test_scenario_2_inventory_duplicate_blocked() -> None:
 
 
 def test_scenario_3_full_format_inbound() -> None:
-    u, p, e, ep = parse_account_line("a2----b2----e@x.com----ep")
-    db.insert_account(u, p, e, ep)
+    u, p, e, ep, url = parse_account_line("a2----b2----e@x.com----ep")
+    db.insert_account(u, p, e, ep, url)
     assert db.count_inventory() == 2
 
 
@@ -67,6 +67,7 @@ def test_scenario_4_fifo_first_outbound() -> None:
         record["password"],
         record["email"],
         record["email_password"],
+        record["url"],
     )
     assert text == "a----b"
     assert db.count_inventory() == 1
@@ -80,6 +81,7 @@ def test_scenario_5_second_outbound_and_history() -> None:
         record["password"],
         record["email"],
         record["email_password"],
+        record["url"],
     )
     assert text == "a2----b2----e@x.com----ep"
     assert db.count_inventory() == 0
@@ -109,7 +111,7 @@ def test_scenario_7_empty_outbound() -> None:
 
 
 def test_parser_errors() -> None:
-    for bad in ("", "only", "a----", "----b", "a----b----c----d----e"):
+    for bad in ("", "only", "a----", "----b", "a----b----c----d----e----f"):
         try:
             parse_account_line(bad)
             raise AssertionError(f"expected error for: {bad!r}")
@@ -117,9 +119,37 @@ def test_parser_errors() -> None:
             pass
 
 
+def test_parser_five_segments() -> None:
+    u, p, e, ep, url = parse_account_line(
+        "user----pass----mail@x.com----mailpass----https://example.com"
+    )
+    assert u == "user"
+    assert p == "pass"
+    assert e == "mail@x.com"
+    assert ep == "mailpass"
+    assert url == "https://example.com"
+
+    u2, p2, e2, ep2, url2 = parse_account_line(
+        "user----pass--------https://example.com"
+    )
+    assert u2 == "user"
+    assert p2 == "pass"
+    assert e2 is None
+    assert ep2 is None
+    assert url2 == "https://example.com"
+
+
 def test_format_account() -> None:
     assert format_account("u", "p") == "u----p"
     assert format_account("u", "p", "e", "ep") == "u----p----e----ep"
+    assert (
+        format_account("u", "p", None, None, "https://x.com")
+        == "u----p--------https://x.com"
+    )
+    assert (
+        format_account("u", "p", "e", "ep", "https://x.com")
+        == "u----p----e----ep----https://x.com"
+    )
 
 
 def test_batch_inbound_mixed_lines() -> None:
@@ -145,6 +175,7 @@ def test_batch_inbound_mixed_lines() -> None:
                 result.password,
                 result.email,
                 result.email_password,
+                result.url,
             )
             seen.add(result.username)
             ready += 1
@@ -173,6 +204,7 @@ def test_batch_inbound_duplicate_in_batch() -> None:
         first.password,
         first.email,
         first.email_password,
+        first.url,
     )
     seen.add(first.username)
 
@@ -410,6 +442,69 @@ def test_review_pending_keyboard_y_without_selection() -> None:
     assert len(failures) == 1
 
 
+def test_batch_inbound_url_passthrough() -> None:
+    _reset_inventory()
+    seen: set[str] = set()
+    line = "u----p----e@x.com----ep----https://site.com"
+    result = classify_inbound_line(
+        line,
+        seen,
+        exists_in_inventory=db.exists_in_inventory,
+        exists_in_outbound=db.exists_in_outbound,
+    )
+    assert isinstance(result, InboundReady)
+    assert result.url == "https://site.com"
+    db.insert_account(
+        result.username,
+        result.password,
+        result.email,
+        result.email_password,
+        result.url,
+    )
+    hits = db.search_inventory("site.com")
+    assert len(hits) == 1
+    assert hits[0]["url"] == "https://site.com"
+
+
+def test_search_inventory_and_history() -> None:
+    _reset_inventory()
+    db.insert_account("findme", "p1", url="https://inv.example")
+    db.insert_account("other", "p2")
+    db.outbound_oldest()
+
+    inv_hits = db.search_inventory("inv.example")
+    assert len(inv_hits) == 0
+
+    hist_hits = db.search_outbound_history("inv.example")
+    assert len(hist_hits) == 1
+    assert hist_hits[0]["username"] == "findme"
+
+    db.insert_account("stock", "pw", email="unique@mail.test")
+    assert len(db.search_inventory("unique@mail")) == 1
+    assert len(db.search_outbound_history("unique@mail")) == 0
+
+
+def test_search_like_escape() -> None:
+    _reset_inventory()
+    db.insert_account("100%off", "p")
+    db.insert_account("normal", "p")
+
+    assert len(db.search_inventory("100%off")) == 1
+    assert len(db.search_inventory("100%")) == 1
+    assert len(db.search_inventory("_")) == 0
+
+
+def test_failure_lines_for_clipboard() -> None:
+    failures = [
+        InboundFailure(line="bad----line", reason="格式错误"),
+        InboundFailure(line="dup----p2", reason="重复"),
+    ]
+    text = cli.failure_lines_for_clipboard(failures)
+    assert text == "bad----line\ndup----p2"
+    assert "格式错误" not in text
+    assert "重复" not in text
+
+
 def test_console_input_read_key_arrows() -> None:
     if sys.platform != "win32":
         assert console_input.kbhit() is False
@@ -432,7 +527,12 @@ def run_all() -> tuple[int, list[str]]:
         ("6 outbound history re-inbound", test_scenario_6_outbound_history_confirm_logic),
         ("7 empty outbound", test_scenario_7_empty_outbound),
         ("parser validation", test_parser_errors),
+        ("parser five segments", test_parser_five_segments),
         ("format_account", test_format_account),
+        ("batch inbound url passthrough", test_batch_inbound_url_passthrough),
+        ("search inventory and history", test_search_inventory_and_history),
+        ("search LIKE escape", test_search_like_escape),
+        ("failure_lines_for_clipboard", test_failure_lines_for_clipboard),
         ("batch inbound mixed lines", test_batch_inbound_mixed_lines),
         ("batch inbound duplicate in batch", test_batch_inbound_duplicate_in_batch),
         ("batch inbound seen username duplicate", test_batch_inbound_seen_username_duplicate),

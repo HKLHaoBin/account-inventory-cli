@@ -27,6 +27,7 @@ class InboundReady:
     password: str
     email: str | None = None
     email_password: str | None = None
+    url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class InboundPending:
     password: str
     email: str | None = None
     email_password: str | None = None
+    url: str | None = None
 
 
 def classify_inbound_line(
@@ -46,7 +48,7 @@ def classify_inbound_line(
     exists_in_outbound: Callable[[str], bool],
 ) -> InboundReady | InboundPending | InboundFailure:
     try:
-        username, password, email, email_password = parse_account_line(line)
+        username, password, email, email_password, url = parse_account_line(line)
     except ValueError as exc:
         return InboundFailure(line=line, reason=str(exc))
 
@@ -63,6 +65,7 @@ def classify_inbound_line(
             password=password,
             email=email,
             email_password=email_password,
+            url=url,
         )
 
     return InboundReady(
@@ -71,4 +74,5 @@ def classify_inbound_line(
         password=password,
         email=email,
         email_password=email_password,
+        url=url,
     )

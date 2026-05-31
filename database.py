@@ -30,6 +30,21 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _migrate_add_url_column(conn: sqlite3.Connection) -> None:
+    for table in ("accounts", "outbound_records"):
+        if not _column_exists(conn, table, "url"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN url TEXT")
+
+
+def _escape_like(substring: str) -> str:
+    return substring.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(
@@ -40,6 +55,7 @@ def init_db() -> None:
                 password TEXT NOT NULL,
                 email TEXT,
                 email_password TEXT,
+                url TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
 
@@ -49,11 +65,13 @@ def init_db() -> None:
                 password TEXT NOT NULL,
                 email TEXT,
                 email_password TEXT,
+                url TEXT,
                 inbound_at TEXT NOT NULL,
                 outbound_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
             """
         )
+        _migrate_add_url_column(conn)
 
 
 def count_inventory() -> int:
@@ -137,18 +155,72 @@ def insert_account(
     password: str,
     email: str | None = None,
     email_password: str | None = None,
+    url: str | None = None,
 ) -> None:
     with _connect() as conn:
         try:
             conn.execute(
                 """
-                INSERT INTO accounts (username, password, email, email_password)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO accounts (username, password, email, email_password, url)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (username, password, email, email_password),
+                (username, password, email, email_password, url),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"账号 {username} 已在库存中") from exc
+
+
+def _row_to_account_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "username": row["username"],
+        "password": row["password"],
+        "email": row["email"],
+        "email_password": row["email_password"],
+        "url": row["url"],
+    }
+
+
+def _search_table(
+    table: str,
+    substring: str,
+    *,
+    order_by: str,
+) -> list[dict[str, Any]]:
+    if not substring:
+        return []
+
+    pattern = f"%{_escape_like(substring)}%"
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT username, password, email, email_password, url
+            FROM {table}
+            WHERE username LIKE ? ESCAPE '\\'
+               OR password LIKE ? ESCAPE '\\'
+               OR email LIKE ? ESCAPE '\\'
+               OR email_password LIKE ? ESCAPE '\\'
+               OR url LIKE ? ESCAPE '\\'
+            ORDER BY {order_by}
+            """,
+            (pattern, pattern, pattern, pattern, pattern),
+        ).fetchall()
+    return [_row_to_account_dict(row) for row in rows]
+
+
+def search_inventory(substring: str) -> list[dict[str, Any]]:
+    return _search_table(
+        "accounts",
+        substring,
+        order_by="created_at ASC, id ASC",
+    )
+
+
+def search_outbound_history(substring: str) -> list[dict[str, Any]]:
+    return _search_table(
+        "outbound_records",
+        substring,
+        order_by="outbound_at DESC, id DESC",
+    )
 
 
 def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
@@ -158,7 +230,7 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, username, password, email, email_password, created_at
+            SELECT id, username, password, email, email_password, url, created_at
             FROM accounts
             ORDER BY created_at ASC, id ASC
             LIMIT ?
@@ -173,15 +245,16 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
             conn.execute(
                 """
                 INSERT INTO outbound_records (
-                    username, password, email, email_password, inbound_at
+                    username, password, email, email_password, url, inbound_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["username"],
                     row["password"],
                     row["email"],
                     row["email_password"],
+                    row["url"],
                     row["created_at"],
                 ),
             )
@@ -191,6 +264,7 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
                     "password": row["password"],
                     "email": row["email"],
                     "email_password": row["email_password"],
+                    "url": row["url"],
                     "created_at": row["created_at"],
                 }
             )

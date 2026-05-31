@@ -20,10 +20,12 @@ def render_home(inventory: int) -> None:
     print(f"当前库存：{inventory}")
     print()
     print("[0] 录入账号（支持多行批量，空行结束）")
-    print("    格式：账号----密码----邮箱----邮箱密码")
-    print("    前两段必填，后两段可选")
+    print("    格式：账号----密码----邮箱----邮箱密码----网址")
+    print("    前两段必填，后三段可选")
     print()
     print("[1] 出库账号（可指定数量，FIFO，自动复制到剪贴板）")
+    print()
+    print("[2] 查找账号（子串匹配，先查库存再查出库历史）")
     print()
     print("[q] 退出")
     print()
@@ -32,6 +34,10 @@ def render_home(inventory: int) -> None:
 
 def copy_to_clipboard(text: str) -> bool:
     return clipboard.copy_text(text)
+
+
+def failure_lines_for_clipboard(failures: list[InboundFailure]) -> str:
+    return "\n".join(f.line for f in failures)
 
 
 def _read_inbound_lines() -> list[str]:
@@ -112,6 +118,7 @@ def _approve_pending_items(
             item.password,
             item.email,
             item.email_password,
+            item.url,
         )
         count += 1
         pending.pop(idx)
@@ -290,6 +297,16 @@ def _print_inbound_summary(success_count: int, failures: list[InboundFailure]) -
             print(f"     {failure.line}")
 
 
+def _copy_failure_lines_to_clipboard(failures: list[InboundFailure]) -> None:
+    if not failures:
+        return
+    text = failure_lines_for_clipboard(failures)
+    if copy_to_clipboard(text):
+        print(f"已复制 {len(failures)} 条失败条目到剪贴板（仅原始行，无错误说明）")
+    else:
+        print("复制失败，请手动复制失败明细中的原始行")
+
+
 def handle_inbound() -> None:
     lines = _read_inbound_lines()
     if not lines:
@@ -298,7 +315,7 @@ def handle_inbound() -> None:
     parsed_usernames: list[str] = []
     for line in lines:
         try:
-            username, _, _, _ = parse_account_line(line)
+            username, _, _, _, _ = parse_account_line(line)
             parsed_usernames.append(username)
         except ValueError:
             continue
@@ -334,6 +351,7 @@ def handle_inbound() -> None:
                 result.password,
                 result.email,
                 result.email_password,
+                result.url,
             )
             seen_usernames.add(result.username)
             inventory_exists.add(result.username)
@@ -345,6 +363,7 @@ def handle_inbound() -> None:
         failures.extend(cancelled)
 
     _print_inbound_summary(success_count, failures)
+    _copy_failure_lines_to_clipboard(failures)
 
 
 def handle_outbound() -> None:
@@ -376,6 +395,7 @@ def handle_outbound() -> None:
             record["password"],
             record["email"],
             record["email_password"],
+            record["url"],
         )
         for record in records
     ]
@@ -393,6 +413,46 @@ def handle_outbound() -> None:
     print(f"当前库存：{db.count_inventory()}")
 
 
+def handle_search() -> None:
+    print()
+    print("请输入查找字符串（直接回车返回）：", end="", flush=True)
+    query = input().strip()
+    if not query:
+        return
+
+    inventory_hits = db.search_inventory(query)
+    if inventory_hits:
+        print()
+        print(f"找到 {len(inventory_hits)} 条【库存】：")
+        for record in inventory_hits:
+            line = format_account(
+                record["username"],
+                record["password"],
+                record["email"],
+                record["email_password"],
+                record["url"],
+            )
+            print(f"  【库存】 {line}")
+        return
+
+    history_hits = db.search_outbound_history(query)
+    if history_hits:
+        print()
+        print(f"找到 {len(history_hits)} 条【出库历史】：")
+        for record in history_hits:
+            line = format_account(
+                record["username"],
+                record["password"],
+                record["email"],
+                record["email_password"],
+                record["url"],
+            )
+            print(f"  【出库历史】 {line}")
+        return
+
+    print("未找到匹配的账号")
+
+
 def main_loop() -> None:
     try:
         while True:
@@ -402,11 +462,13 @@ def main_loop() -> None:
                 handle_inbound()
             elif command == "1":
                 handle_outbound()
+            elif command == "2":
+                handle_search()
             elif command == "q":
                 print("再见。")
                 break
             else:
-                print("无效命令，请输入 0、1 或 q")
+                print("无效命令，请输入 0、1、2 或 q")
     except KeyboardInterrupt:
         print()
         print("再见。")

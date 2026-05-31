@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-def parse_account_line(line: str) -> tuple[str, str, str | None, str | None]:
-    """Parse account----password----email----email_password (2-4 fields)."""
+def parse_account_line(line: str) -> tuple[str, str, str | None, str | None, str | None]:
+    """Parse account----password----email----email_password----url (2-5 fields)."""
     stripped = line.strip()
     if not stripped:
         raise ValueError("输入不能为空")
@@ -12,8 +12,10 @@ def parse_account_line(line: str) -> tuple[str, str, str | None, str | None]:
     parts = [p.strip() for p in stripped.split("----")]
     if len(parts) < 2:
         raise ValueError("格式错误：至少需要「账号----密码」两段")
-    if len(parts) > 4:
-        raise ValueError("格式错误：最多 4 段（账号----密码----邮箱----邮箱密码）")
+    if len(parts) > 5:
+        raise ValueError(
+            "格式错误：最多 5 段（账号----密码----邮箱----邮箱密码----网址）"
+        )
 
     username, password = parts[0], parts[1]
     if not username:
@@ -23,12 +25,20 @@ def parse_account_line(line: str) -> tuple[str, str, str | None, str | None]:
 
     email: str | None = None
     email_password: str | None = None
-    if len(parts) >= 3:
-        email = parts[2] or None
-    if len(parts) >= 4:
-        email_password = parts[3] or None
+    url: str | None = None
+    if len(parts) == 4 and not parts[2]:
+        email = None
+        email_password = None
+        url = parts[3] or None
+    else:
+        if len(parts) >= 3:
+            email = parts[2] or None
+        if len(parts) >= 4:
+            email_password = parts[3] or None
+        if len(parts) >= 5:
+            url = parts[4] or None
 
-    return username, password, email, email_password
+    return username, password, email, email_password, url
 
 
 def format_account(
@@ -36,10 +46,17 @@ def format_account(
     password: str,
     email: str | None = None,
     email_password: str | None = None,
+    url: str | None = None,
 ) -> str:
     """Format for display and clipboard."""
-    if email is None and email_password is None:
+    if email is None and email_password is None and url is None:
         return f"{username}----{password}"
+    if url is not None and email is None and email_password is None:
+        return f"{username}----{password}--------{url}"
+    if url is None:
+        return "----".join(
+            [username, password, email or "", email_password or ""]
+        )
     return "----".join(
-        [username, password, email or "", email_password or ""]
+        [username, password, email or "", email_password or "", url or ""]
     )
