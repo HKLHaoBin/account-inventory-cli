@@ -567,6 +567,81 @@ def test_search_mode_empty_query_retries() -> None:
         cli.handle_search()
 
 
+def test_outbound_by_username() -> None:
+    _reset_inventory()
+    db.insert_account("first", "p1")
+    db.insert_account("second", "p2", email="target@mail.test")
+
+    record = db.outbound_by_username("second")
+    assert record is not None
+    assert record["username"] == "second"
+    assert record["password"] == "p2"
+    assert record["email"] == "target@mail.test"
+    assert record["email_password"] is None
+    assert record["url"] is None
+    assert record["created_at"] is not None
+
+    assert not db.exists_in_inventory("second")
+    assert db.exists_in_inventory("first")
+    assert db.exists_in_outbound("second")
+    assert db.count_inventory() == 1
+    assert db.count_outbound_records() == 1
+
+
+def test_search_single_inventory_offers_outbound() -> None:
+    _reset_inventory()
+    db.insert_account("stock", "pw", email="unique@mail.test")
+
+    with mock.patch(
+        "console_input.read_line_or_exit",
+        side_effect=["unique@mail", "Y", None],
+    ), mock.patch("cli.copy_to_clipboard", return_value=True):
+        cli.handle_search()
+
+    assert db.count_inventory() == 0
+    assert db.count_outbound_records() == 1
+    assert db.exists_in_outbound("stock")
+
+    _reset_inventory()
+    db.insert_account("stock", "pw", email="unique@mail.test")
+
+    with mock.patch(
+        "console_input.read_line_or_exit",
+        side_effect=["unique@mail", "", None],
+    ):
+        cli.handle_search()
+
+    assert db.count_inventory() == 1
+    assert db.count_outbound_records() == 0
+
+    _reset_inventory()
+    db.insert_account("stock", "pw", email="unique@mail.test")
+
+    with mock.patch(
+        "console_input.read_line_or_exit",
+        side_effect=["unique@mail", "n", None],
+    ):
+        cli.handle_search()
+
+    assert db.count_inventory() == 1
+    assert db.count_outbound_records() == 0
+
+
+def test_search_multiple_inventory_no_outbound_prompt() -> None:
+    _reset_inventory()
+    db.insert_account("user1", "p1")
+    db.insert_account("user2", "p2")
+
+    with mock.patch(
+        "console_input.read_line_or_exit",
+        side_effect=["user", None],
+    ), mock.patch("database.outbound_by_username") as outbound_mock:
+        cli.handle_search()
+
+    outbound_mock.assert_not_called()
+    assert db.count_inventory() == 2
+
+
 def run_all() -> tuple[int, list[str]]:
     failures: list[str] = []
     tests = [
@@ -607,6 +682,9 @@ def run_all() -> tuple[int, list[str]]:
         ("inbound mode stays after batch", test_inbound_mode_stays_after_batch),
         ("outbound mode invalid then retry", test_outbound_mode_invalid_then_retry),
         ("search mode empty query retries", test_search_mode_empty_query_retries),
+        ("outbound by username", test_outbound_by_username),
+        ("search single inventory outbound", test_search_single_inventory_offers_outbound),
+        ("search multiple no outbound prompt", test_search_multiple_inventory_no_outbound_prompt),
     ]
     passed = 0
     for name, fn in tests:

@@ -384,6 +384,31 @@ def handle_inbound() -> None:
         _process_inbound_batch(lines)
 
 
+def _print_outbound_success(records: list[dict]) -> None:
+    lines = [
+        format_account(
+            record["username"],
+            record["password"],
+            record["email"],
+            record["email_password"],
+            record["url"],
+        )
+        for record in records
+    ]
+    text = "\n".join(lines)
+
+    print()
+    print("出库成功：")
+    for line in lines:
+        print(line)
+
+    if copy_to_clipboard(text):
+        print("已复制到剪贴板")
+    else:
+        print("复制失败，请手动复制")
+    print(f"当前库存：{db.count_inventory()}")
+
+
 def handle_outbound() -> None:
     while True:
         _print_mode_header("出库模式")
@@ -413,28 +438,7 @@ def handle_outbound() -> None:
             print("当前无库存，无法出库")
             continue
 
-        lines = [
-            format_account(
-                record["username"],
-                record["password"],
-                record["email"],
-                record["email_password"],
-                record["url"],
-            )
-            for record in records
-        ]
-        text = "\n".join(lines)
-
-        print()
-        print("出库成功：")
-        for line in lines:
-            print(line)
-
-        if copy_to_clipboard(text):
-            print("已复制到剪贴板")
-        else:
-            print("复制失败，请手动复制")
-        print(f"当前库存：{db.count_inventory()}")
+        _print_outbound_success(records)
 
 
 def handle_search() -> None:
@@ -460,6 +464,20 @@ def handle_search() -> None:
                     record["url"],
                 )
                 print(f"  【库存】 {line}")
+
+            if len(inventory_hits) == 1:
+                confirm = console_input.read_line_or_exit(
+                    "是否出库该账号？(Y/N，直接回车跳过)："
+                )
+                if confirm is None:
+                    break
+                if confirm.lower() == "y":
+                    record = inventory_hits[0]
+                    outbound = db.outbound_by_username(record["username"])
+                    if outbound is None:
+                        print("出库失败，该账号可能已不在库存中")
+                    else:
+                        _print_outbound_success([outbound])
             continue
 
         history_hits = db.search_outbound_history(query)

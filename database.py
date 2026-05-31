@@ -283,6 +283,47 @@ def outbound_oldest() -> dict[str, Any] | None:
     return records[0] if records else None
 
 
+def outbound_by_username(username: str) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, username, password, email, email_password, url, created_at
+            FROM accounts
+            WHERE username = ?
+            """,
+            (username,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        conn.execute(
+            """
+            INSERT INTO outbound_records (
+                username, password, email, email_password, url, inbound_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["username"],
+                row["password"],
+                row["email"],
+                row["email_password"],
+                row["url"],
+                row["created_at"],
+            ),
+        )
+        conn.execute("DELETE FROM accounts WHERE id = ?", (row["id"],))
+
+        return {
+            "username": row["username"],
+            "password": row["password"],
+            "email": row["email"],
+            "email_password": row["email_password"],
+            "url": row["url"],
+            "created_at": row["created_at"],
+        }
+
+
 def count_outbound_records() -> int:
     """Helper for tests."""
     with _connect() as conn:
