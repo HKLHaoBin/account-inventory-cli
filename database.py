@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
-_DATA_DIR = Path(__file__).resolve().parent / "data"
+
+def _app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+_DATA_DIR = _app_dir() / "data"
 _DB_NAME = "accounts.db"
 
 

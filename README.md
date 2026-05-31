@@ -37,6 +37,12 @@ python main.py
 
 首次运行会自动创建 `data/accounts.db`。
 
+### Windows 可执行文件
+
+推送至 `main` 分支后，GitHub Actions 会自动构建 Windows 版 `account-inventory-cli.exe` 并发布到 [Releases](https://github.com/HKLHaoBin/account-inventory-cli/releases)。下载后双击或在命令行运行即可；数据库会创建在 EXE 同目录下的 `data/accounts.db`。
+
+如需发布新版本，更新仓库根目录的 `VERSION` 文件后推送到 `main`。
+
 ## 使用说明
 
 启动后进入交互菜单：
