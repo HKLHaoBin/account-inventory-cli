@@ -318,18 +318,22 @@ def test_exists_many_batch() -> None:
 
 
 def test_clipboard_copy_text() -> None:
-    with mock.patch("clipboard._copy_text_win32", return_value=True):
+    import pyperclip
+
+    with mock.patch("pyperclip.copy") as copy_mock:
+        copy_mock.return_value = None
         assert clipboard.copy_text("hello") is True
+        copy_mock.assert_called_once_with("hello")
 
-    with mock.patch("clipboard._copy_text_win32", return_value=False), mock.patch(
-        "clipboard._copy_text_tk", return_value=True
-    ):
-        assert clipboard.copy_text("fallback") is True
+    with mock.patch("pyperclip.copy") as copy_mock, mock.patch("clipboard.time.sleep"):
+        copy_mock.side_effect = [pyperclip.PyperclipException(), None]
+        assert clipboard.copy_text("retry") is True
+        assert copy_mock.call_count == 2
 
-    with mock.patch("clipboard._copy_text_win32", return_value=False), mock.patch(
-        "clipboard._copy_text_tk", return_value=False
-    ):
+    with mock.patch("pyperclip.copy") as copy_mock, mock.patch("clipboard.time.sleep"):
+        copy_mock.side_effect = pyperclip.PyperclipException()
         assert clipboard.copy_text("fail") is False
+        assert copy_mock.call_count == 5
 
 
 def test_batch_inbound_pending_approve() -> None:

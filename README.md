@@ -9,6 +9,7 @@
 ```bash
 git clone https://github.com/HKLHaoBin/account-inventory-cli.git
 cd account-inventory-cli
+pip install -r requirements.txt
 python main.py
 ```
 
@@ -29,7 +30,7 @@ python main.py
 ## 环境要求
 
 - Python 3.10+
-- 仅使用标准库（SQLite；Windows 优先用 Win32 剪贴板，`tkinter` 作 fallback）
+- 标准库（SQLite 等）+ [pyperclip](https://pypi.org/project/pyperclip/)（剪贴板复制）
 
 ## 运行
 
@@ -217,7 +218,7 @@ user002----pass456
 .
 ├── main.py              # 入口：初始化数据库并启动 CLI
 ├── cli.py               # 交互菜单、批量录入/出库/查找、待确认多选
-├── clipboard.py         # Win32 剪贴板 + tkinter fallback
+├── clipboard.py         # pyperclip 剪贴板复制（含重试）
 ├── console_input.py     # 控制台按键读取（Windows + Unix Esc 支持）
 ├── database.py          # SQLite 读写与查找
 ├── batch.py             # 批量入库/出库分类逻辑（可测试）
@@ -239,6 +240,7 @@ user002----pass456
 ## 测试
 
 ```bash
+pip install -r requirements.txt
 python test_verification.py
 ```
 

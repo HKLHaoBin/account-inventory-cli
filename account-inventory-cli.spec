@@ -1,22 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
-
-datas = []
-binaries = []
-hiddenimports = ["tkinter", "_tkinter"]
-tmp_ret = collect_all("tkinter")
-datas += tmp_ret[0]
-binaries += tmp_ret[1]
-hiddenimports += tmp_ret[2]
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
+    binaries=[],
+    datas=[],
+    hiddenimports=["pyperclip"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
