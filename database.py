@@ -106,43 +106,62 @@ def insert_account(
             raise ValueError(f"账号 {username} 已在库存中") from exc
 
 
-def outbound_oldest() -> dict[str, Any] | None:
+def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
+    if count <= 0:
+        return []
+
     with _connect() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT id, username, password, email, email_password, created_at
             FROM accounts
             ORDER BY created_at ASC, id ASC
-            LIMIT 1
-            """
-        ).fetchone()
-        if row is None:
-            return None
-
-        conn.execute(
-            """
-            INSERT INTO outbound_records (
-                username, password, email, email_password, inbound_at
-            )
-            VALUES (?, ?, ?, ?, ?)
+            LIMIT ?
             """,
-            (
-                row["username"],
-                row["password"],
-                row["email"],
-                row["email_password"],
-                row["created_at"],
-            ),
-        )
-        conn.execute("DELETE FROM accounts WHERE id = ?", (row["id"],))
+            (count,),
+        ).fetchall()
+        if not rows:
+            return []
 
-        return {
-            "username": row["username"],
-            "password": row["password"],
-            "email": row["email"],
-            "email_password": row["email_password"],
-            "created_at": row["created_at"],
-        }
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            conn.execute(
+                """
+                INSERT INTO outbound_records (
+                    username, password, email, email_password, inbound_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    row["username"],
+                    row["password"],
+                    row["email"],
+                    row["email_password"],
+                    row["created_at"],
+                ),
+            )
+            records.append(
+                {
+                    "username": row["username"],
+                    "password": row["password"],
+                    "email": row["email"],
+                    "email_password": row["email_password"],
+                    "created_at": row["created_at"],
+                }
+            )
+
+        ids = [row["id"] for row in rows]
+        placeholders = ",".join("?" * len(ids))
+        conn.execute(
+            f"DELETE FROM accounts WHERE id IN ({placeholders})",
+            ids,
+        )
+        return records
+
+
+def outbound_oldest() -> dict[str, Any] | None:
+    records = outbound_oldest_many(1)
+    return records[0] if records else None
 
 
 def count_outbound_records() -> int:
