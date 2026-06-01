@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
+from urllib.parse import quote, unquote
 
 import requests
 
@@ -27,6 +28,8 @@ else:
 
 GITHUB_REPO = os.getenv("UPDATER_GITHUB_REPO", "HKLHaoBin/account-inventory-cli")
 GITHUB_RELEASE_LATEST_API = "https://api.github.com/repos/{repo}/releases/latest"
+GITHUB_RELEASE_LATEST_WEB = "https://github.com/{repo}/releases/latest"
+GITHUB_RELEASE_DOWNLOAD_WEB = "https://github.com/{repo}/releases/download/{tag}/{asset}"
 RELEASE_ZIP_NAME = "account-inventory-web-windows.zip"
 RELEASE_SHA256_NAME = "account-inventory-web-windows.zip.sha256"
 APP_EXE_NAME = "account-inventory-web.exe"
@@ -144,6 +147,38 @@ def read_app_version(work_dir: Path) -> str:
     except OSError:
         value = ""
     return value or "0.0.0-dev"
+
+
+def json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def github_token() -> str:
+    return os.getenv("UPDATER_GITHUB_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
+
+
+def has_github_token() -> bool:
+    return bool(github_token())
+
+
+def active_github_rate_limit_cooldown(work_dir: Path, now_epoch: int | None = None) -> dict[str, Any] | None:
+    if has_github_token():
+        return None
+    payload = json_file(work_dir / STATUS_FILE_NAME)
+    try:
+        reset_epoch = int(payload.get("github_rate_limit_reset") or 0)
+    except (TypeError, ValueError):
+        reset_epoch = 0
+    now_value = int(time.time()) if now_epoch is None else int(now_epoch)
+    if payload.get("state") == "error" and reset_epoch > now_value:
+        return payload
+    return None
 
 
 def parse_version(value: str) -> Optional[tuple[int, int, int]]:
@@ -279,12 +314,18 @@ def retry_io(
 
 
 def github_latest_release(repo: str, timeout: int = 20) -> dict[str, Any]:
+    if has_github_token():
+        return github_latest_release_api(repo, timeout)
+    return github_latest_release_web(repo, timeout)
+
+
+def github_latest_release_api(repo: str, timeout: int = 20) -> dict[str, Any]:
     url = GITHUB_RELEASE_LATEST_API.format(repo=repo)
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "account-inventory-updater",
     }
-    token = os.getenv("UPDATER_GITHUB_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
+    token = github_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     response = requests.get(url, headers=headers, timeout=timeout)
@@ -292,6 +333,54 @@ def github_latest_release(repo: str, timeout: int = 20) -> dict[str, Any]:
         raise GitHubRateLimitError(github_rate_limit_reset_epoch(response))
     response.raise_for_status()
     return response.json()
+
+
+def github_latest_release_web(repo: str, timeout: int = 20) -> dict[str, Any]:
+    url = GITHUB_RELEASE_LATEST_WEB.format(repo=repo.strip("/"))
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "account-inventory-updater",
+    }
+    response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    response.raise_for_status()
+    latest_url = str(getattr(response, "url", "") or url)
+    tag = parse_github_release_tag_from_url(latest_url)
+    if not tag:
+        raise RuntimeError("could not resolve latest GitHub release tag")
+    return github_release_from_tag(repo, tag, latest_url)
+
+
+def parse_github_release_tag_from_url(url: str) -> str:
+    match = re.search(r"/releases/tag/([^/?#]+)", url)
+    return unquote(match.group(1)) if match else ""
+
+
+def github_asset_download_url(repo: str, tag: str, asset_name: str) -> str:
+    return GITHUB_RELEASE_DOWNLOAD_WEB.format(
+        repo=repo.strip("/"),
+        tag=quote(tag, safe=""),
+        asset=quote(asset_name, safe=""),
+    )
+
+
+def github_release_from_tag(repo: str, tag: str, html_url: str = "") -> dict[str, Any]:
+    return {
+        "tag_name": tag,
+        "name": "",
+        "body": "",
+        "published_at": "",
+        "html_url": html_url,
+        "assets": [
+            {
+                "name": RELEASE_ZIP_NAME,
+                "browser_download_url": github_asset_download_url(repo, tag, RELEASE_ZIP_NAME),
+            },
+            {
+                "name": RELEASE_SHA256_NAME,
+                "browser_download_url": github_asset_download_url(repo, tag, RELEASE_SHA256_NAME),
+            },
+        ],
+    }
 
 
 def is_github_rate_limited(response: requests.Response) -> bool:
@@ -791,8 +880,44 @@ def finalize_or_rollback(ctx: RuntimeContext, prepared: PreparedUpdate, apply_er
     return {"state": "rolled_back", "message": "update failed and rollback recovered old version", "extra": extra}
 
 
+def cooldown_result_from_status(ctx: RuntimeContext, status: dict[str, Any], repo: str, local_version: str) -> dict[str, Any]:
+    extra = {
+        key: value
+        for key, value in status.items()
+        if key not in {"timestamp", "state", "message", "phase"}
+    }
+    extra.setdefault("repo", repo)
+    extra.setdefault("local_version", local_version)
+    message = str(status.get("message") or "GitHub API rate limit exceeded")
+    write_phase_status(ctx.work_dir, "error", message, "failed", extra)
+    return {"state": "error", "message": message, "extra": extra}
+
+
+def next_watch_sleep_seconds(
+    interval_seconds: int,
+    state: str,
+    extra: dict[str, Any],
+    now_epoch: int | None = None,
+) -> int:
+    sleep_seconds = max(60, int(interval_seconds))
+    if state != "error" or has_github_token():
+        return sleep_seconds
+    try:
+        reset_epoch = int(extra.get("github_rate_limit_reset") or 0)
+    except (TypeError, ValueError):
+        reset_epoch = 0
+    now_value = int(time.time()) if now_epoch is None else int(now_epoch)
+    if reset_epoch > now_value:
+        sleep_seconds = max(sleep_seconds, reset_epoch - now_value)
+    return sleep_seconds
+
+
 def run_update_once(ctx: RuntimeContext, repo: str) -> dict[str, Any]:
     local_version = (ctx.app_version or "").strip() or read_app_version(ctx.work_dir)
+    cooldown = active_github_rate_limit_cooldown(ctx.work_dir)
+    if cooldown is not None:
+        return cooldown_result_from_status(ctx, cooldown, repo, local_version)
+
     write_phase_status(ctx.work_dir, "checking", "checking latest release", "checking", {"repo": repo, "local_version": local_version})
     release = github_latest_release(repo)
     summary = release_summary(release)
@@ -934,6 +1059,7 @@ def main() -> int:
 
             if not args.watch:
                 break
+            sleep_seconds = next_watch_sleep_seconds(interval_seconds, last_state, last_extra)
             write_phase_status(
                 work_dir,
                 last_state,
@@ -944,11 +1070,12 @@ def main() -> int:
                     "repo": str(args.repo),
                     "loop_state": "sleeping",
                     "interval_seconds": interval_seconds,
+                    "next_check_after_seconds": sleep_seconds,
                     "last_result_state": last_state,
                     "last_result_message": last_message,
                 },
             )
-            time.sleep(interval_seconds)
+            time.sleep(sleep_seconds)
     finally:
         release_single_instance_lock(instance_lock)
 

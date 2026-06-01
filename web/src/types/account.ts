@@ -177,6 +177,8 @@ export interface UpdateStatusPayload {
   release_published_at?: string;
   update_available?: boolean;
   assets_ready?: boolean;
+  github_rate_limit_reset?: number;
+  github_rate_limit_reset_at?: string;
   sidecar_pid?: number;
   last_result_state?: string;
   last_result_message?: string;

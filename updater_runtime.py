@@ -273,16 +273,7 @@ def check_latest_update(root: Path = ROOT) -> dict[str, Any]:
     repo = os.getenv("UPDATER_GITHUB_REPO", updater.GITHUB_REPO)
     local_version = read_app_version(root)
     current = read_update_status(root)
-    reset_at = int(current.get("github_rate_limit_reset") or 0)
-    has_github_token = bool(
-        os.getenv("UPDATER_GITHUB_TOKEN", "").strip()
-        or os.getenv("GITHUB_TOKEN", "").strip()
-    )
-    if (
-        current.get("state") == "error"
-        and reset_at > int(time.time())
-        and not has_github_token
-    ):
+    if updater.active_github_rate_limit_cooldown(root) is not None:
         return current
 
     try:

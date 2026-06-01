@@ -108,6 +108,11 @@ export default function SettingsPage() {
     return updateStatus.latest_tag;
   }, [updateStatus]);
 
+  const rateLimitText = useMemo(() => {
+    if (updateStatus?.state !== "error" || !updateStatus.github_rate_limit_reset_at) return "";
+    return `GitHub API 暂时限流，重置时间：${updateStatus.github_rate_limit_reset_at}。请稍后重试；高级用户可配置 UPDATER_GITHUB_TOKEN。`;
+  }, [updateStatus]);
+
   async function handleCheckUpdate() {
     setChecking(true);
     try {
@@ -190,6 +195,12 @@ export default function SettingsPage() {
           {(updateError || updateStatus?.rollback_reason) && (
             <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
               {updateError || updateStatus?.rollback_reason}
+            </div>
+          )}
+
+          {rateLimitText && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+              {rateLimitText}
             </div>
           )}
 

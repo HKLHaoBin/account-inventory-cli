@@ -1247,6 +1247,45 @@ def test_updater_github_token_header() -> None:
     assert release["tag_name"] == "v0.2.0"
 
 
+def test_updater_web_latest_without_token() -> None:
+    import updater
+
+    class DummyResponse:
+        status_code = 200
+        headers: dict[str, str] = {}
+        url = "https://github.com/owner/repo/releases/tag/v0.1.10"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    with mock.patch.dict(
+        "os.environ",
+        {"UPDATER_GITHUB_TOKEN": "", "GITHUB_TOKEN": ""},
+    ), mock.patch("updater.requests.get", return_value=DummyResponse()) as get_mock:
+        release = updater.github_latest_release("owner/repo")
+
+    url = get_mock.call_args.args[0]
+    assert url == "https://github.com/owner/repo/releases/latest"
+    assert "api.github.com" not in url
+    assert get_mock.call_args.kwargs["allow_redirects"] is True
+    assert release["tag_name"] == "v0.1.10"
+    assert updater.find_asset_url(release, updater.RELEASE_ZIP_NAME) == (
+        "https://github.com/owner/repo/releases/download/v0.1.10/account-inventory-web-windows.zip"
+    )
+
+
+def test_updater_release_tag_parse_and_download_urls() -> None:
+    import updater
+
+    assert updater.parse_github_release_tag_from_url(
+        "https://github.com/owner/repo/releases/tag/v0.1.10?x=1"
+    ) == "v0.1.10"
+    assert updater.github_asset_download_url("owner/repo", "v0.1.10", updater.RELEASE_SHA256_NAME) == (
+        "https://github.com/owner/repo/releases/download/v0.1.10/"
+        "account-inventory-web-windows.zip.sha256"
+    )
+
+
 def test_update_check_rate_limit_status() -> None:
     import updater
     import updater_runtime
@@ -1298,6 +1337,63 @@ def test_update_check_rate_limit_cooldown() -> None:
     inspect_mock.assert_not_called()
     assert status["state"] == "error"
     assert status["github_rate_limit_reset"] == reset_epoch
+
+
+def test_run_update_once_rate_limit_cooldown() -> None:
+    import time
+    import updater
+
+    reset_epoch = int(time.time()) + 3600
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "VERSION").write_text("0.1.0", encoding="utf-8")
+        updater.write_phase_status(
+            root,
+            "error",
+            "GitHub API rate limit exceeded",
+            "failed",
+            {
+                "repo": "owner/repo",
+                "local_version": "0.1.0",
+                "github_rate_limit_reset": reset_epoch,
+            },
+        )
+        ctx = updater.RuntimeContext(root, 8000, 0, "python", None, None, Path(sys.executable), "0.1.0")
+        with mock.patch.dict(
+            "os.environ",
+            {"UPDATER_GITHUB_TOKEN": "", "GITHUB_TOKEN": ""},
+        ), mock.patch.object(updater, "github_latest_release") as latest_mock:
+            result = updater.run_update_once(ctx, "owner/repo")
+
+    latest_mock.assert_not_called()
+    assert result["state"] == "error"
+    assert result["extra"]["github_rate_limit_reset"] == reset_epoch
+
+
+def test_updater_watch_sleep_uses_rate_limit_reset() -> None:
+    import updater
+
+    with mock.patch.dict("os.environ", {"UPDATER_GITHUB_TOKEN": "", "GITHUB_TOKEN": ""}):
+        assert updater.next_watch_sleep_seconds(
+            60,
+            "error",
+            {"github_rate_limit_reset": 900},
+            now_epoch=100,
+        ) == 800
+        assert updater.next_watch_sleep_seconds(
+            3600,
+            "error",
+            {"github_rate_limit_reset": 900},
+            now_epoch=100,
+        ) == 3600
+
+    with mock.patch.dict("os.environ", {"UPDATER_GITHUB_TOKEN": "token-123"}):
+        assert updater.next_watch_sleep_seconds(
+            60,
+            "error",
+            {"github_rate_limit_reset": 900},
+            now_epoch=100,
+        ) == 60
 
 
 def test_updater_whitelist_blocks_data_and_source() -> None:
@@ -1433,8 +1529,12 @@ def run_all() -> tuple[int, list[str]]:
         ("updater version compare", test_updater_version_compare),
         ("updater release assets", test_updater_release_assets),
         ("updater github token header", test_updater_github_token_header),
+        ("updater web latest without token", test_updater_web_latest_without_token),
+        ("updater release tag parse and download urls", test_updater_release_tag_parse_and_download_urls),
         ("update check rate limit status", test_update_check_rate_limit_status),
         ("update check rate limit cooldown", test_update_check_rate_limit_cooldown),
+        ("run update once rate limit cooldown", test_run_update_once_rate_limit_cooldown),
+        ("updater watch sleep uses rate limit reset", test_updater_watch_sleep_uses_rate_limit_reset),
         ("updater whitelist", test_updater_whitelist_blocks_data_and_source),
         ("update trigger token guard", test_update_trigger_token_guard),
         ("launch update once command", test_launch_update_once_command),
