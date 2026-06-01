@@ -13,7 +13,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { cn, formatAccountLine } from "@/lib/utils";
+import { writeAppClipboardText } from "@/lib/api";
+import { formatAccountLine } from "@/lib/utils";
 import { mockHistory, mockInventory } from "@/lib/mock-data";
 import type { SearchResult } from "@/types/account";
 
@@ -217,7 +218,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                       size="sm"
                       onClick={() => {
                         const a = inventoryResults[0].account;
-                        navigator.clipboard.writeText(
+                        void writeAppClipboardText(
                           formatAccountLine(
                             a.username,
                             a.password,

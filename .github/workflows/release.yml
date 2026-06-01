@@ -12,8 +12,11 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
+  version:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,31 +42,159 @@ jobs:
           echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Bumped to ${NEW_VERSION}"
 
+      - name: Upload VERSION artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-file
+          path: VERSION
+          if-no-files-found: error
+
+  build-frontend:
+    runs-on: windows-latest
+    needs: version
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply release version
+        shell: bash
+        run: echo "${{ needs.version.outputs.version }}" > VERSION
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build frontend static export
+        working-directory: web
+        run: npm run build
+
+      - name: Verify frontend artifact
+        shell: bash
+        run: test -f web/out/index.html
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-out
+          path: web/out
+          if-no-files-found: error
+
+  build-backend:
+    runs-on: windows-latest
+    needs: version
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply release version
+        shell: bash
+        run: echo "${{ needs.version.outputs.version }}" > VERSION
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt pyinstaller
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Build backend Windows EXE
+        run: pyinstaller --noconfirm account-inventory-web.spec
 
-      - name: Build Windows EXE
-        run: pyinstaller --noconfirm account-inventory-cli.spec
+      - name: Build updater Windows EXE
+        run: pyinstaller --noconfirm --onefile --name updater updater.py
 
-      - name: Verify EXE artifact
+      - name: Verify backend artifact
         shell: bash
         run: |
-          test -f dist/account-inventory-cli.exe
+          test -f dist/account-inventory-web.exe
+          test -f dist/updater.exe
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-exe
+          path: |
+            dist/account-inventory-web.exe
+            dist/updater.exe
+          if-no-files-found: error
+
+  package-release:
+    runs-on: windows-latest
+    needs:
+      - version
+      - build-frontend
+      - build-backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-out
+          path: release-package/web/out
+
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-exe
+          path: release-package
+
+      - name: Download VERSION artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: version-file
+          path: release-package
+
+      - name: Add run helper
+        shell: pwsh
+        run: |
+          @'
+          @echo off
+          account-inventory-web.exe
+          '@ | Set-Content -Path release-package\start-web.bat -Encoding ASCII
+
+      - name: Verify release package
+        shell: bash
+        run: |
+          test -f release-package/account-inventory-web.exe
+          test -f release-package/updater.exe
+          test -f release-package/web/out/index.html
+          test -f release-package/VERSION
+          test -f release-package/start-web.bat
+
+      - name: Compress release package
+        shell: pwsh
+        run: |
+          $versioned = "account-inventory-web-${{ needs.version.outputs.version }}-windows.zip"
+          $stable = "account-inventory-web-windows.zip"
+          Compress-Archive `
+            -Path release-package\* `
+            -DestinationPath $versioned `
+            -Force
+          Copy-Item $versioned $stable -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $stable).Hash.ToLower()
+          "$hash  $stable" | Set-Content -Path "$stable.sha256" -Encoding ASCII
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Release ${{ steps.version.outputs.tag }}
-          files: dist/account-inventory-cli.exe
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: Release ${{ needs.version.outputs.tag }}
+          files: |
+            account-inventory-web-${{ needs.version.outputs.version }}-windows.zip
+            account-inventory-web-windows.zip
+            account-inventory-web-windows.zip.sha256
           generate_release_notes: true
           overwrite_files: true
           make_latest: true
@@ -71,9 +202,10 @@ jobs:
       - name: Commit VERSION bump
         shell: bash
         run: |
+          cp release-package/VERSION VERSION
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add VERSION
           git diff --staged --quiet && exit 0
-          git commit -m "chore: bump version to ${{ steps.version.outputs.version }} [skip ci]"
+          git commit -m "chore: bump version to ${{ needs.version.outputs.version }} [skip ci]"
           git push

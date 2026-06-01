@@ -63,3 +63,85 @@ export interface SearchResult {
   account: Account | OutboundRecord;
   matchedField: string;
 }
+
+export interface DashboardPayload {
+  stats: {
+    inventoryCount: number;
+    todayInbound: number;
+    todayOutbound: number;
+    pendingCount: number;
+  };
+  fifoPreview: Account[];
+  recentActivities: ActivityItem[];
+}
+
+export interface InboundPreviewRow {
+  clientId: string;
+  line: string;
+  username?: string | null;
+  password?: string | null;
+  email?: string | null;
+  emailPassword?: string | null;
+  url?: string | null;
+  category: InboundCategory;
+  reason?: string | null;
+  lastOutboundAt?: string | null;
+  selected?: boolean;
+  deleted?: boolean;
+}
+
+export type InboundCommitStatus =
+  | "success"
+  | "error"
+  | "warning"
+  | "skipped";
+
+export interface InboundCommitResultRow extends InboundPreviewRow {
+  status: InboundCommitStatus;
+  message: string;
+}
+
+export interface InboundCommitPayload {
+  rows: InboundCommitResultRow[];
+  successCount: number;
+  errorCount: number;
+  warningCount: number;
+}
+
+export interface FifoPreviewPayload {
+  max: number;
+  quantity: number;
+  rows: Account[];
+}
+
+export interface FifoCommitPayload extends FifoPreviewPayload {
+  clipboardText: string;
+}
+
+export interface ClipboardMessage {
+  source: "clipboard";
+  text: string;
+  validLines: string[];
+  rejectedCount: number;
+}
+
+export interface UpdateStatusPayload {
+  timestamp: string;
+  state: string;
+  message: string;
+  phase: string;
+  repo?: string;
+  local_version?: string;
+  latest_tag?: string;
+  release_title?: string;
+  release_published_at?: string;
+  update_available?: boolean;
+  assets_ready?: boolean;
+  sidecar_pid?: number;
+  last_result_state?: string;
+  last_result_message?: string;
+  rollback_reason?: string;
+  updated_targets?: string[];
+  updated_count?: number;
+  skipped_count?: number;
+}

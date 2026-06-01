@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
+import { writeAppClipboardText } from "@/lib/api";
 import { mockInventory } from "@/lib/mock-data";
 import {
   cn,
@@ -81,7 +82,7 @@ export default function InventoryPage() {
   };
 
   const copyAccount = (a: Account) => {
-    navigator.clipboard.writeText(
+    void writeAppClipboardText(
       formatAccountLine(
         a.username,
         a.password,
@@ -164,7 +165,7 @@ export default function InventoryPage() {
                 )
               )
               .join("\n");
-            navigator.clipboard.writeText(lines);
+            void writeAppClipboardText(lines);
           }}
         >
           <Copy className="h-4 w-4" />

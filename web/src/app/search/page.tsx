@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
+import { writeAppClipboardText } from "@/lib/api";
 import { mockHistory, mockInventory } from "@/lib/mock-data";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
 import type { SearchResult } from "@/types/account";
@@ -92,7 +93,7 @@ function SearchContent() {
 
   const copyResult = (r: SearchResult) => {
     const a = r.account;
-    navigator.clipboard.writeText(
+    void writeAppClipboardText(
       formatAccountLine(
         a.username,
         a.password,

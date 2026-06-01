@@ -1,6 +1,16 @@
 data/
 __pycache__/
 *.pyc
+build/
+dist/
+release-package/
+*.zip
+.uploads/
+.updater.pid
+.updater.runtime.json
+.updater.status.json
+.updater-sidecar/
+data/updater-backups/
 
 # Next.js frontend
 web/node_modules/

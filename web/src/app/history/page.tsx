@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
+import { writeAppClipboardText } from "@/lib/api";
 import { mockHistory } from "@/lib/mock-data";
 import {
   formatAccountLine,
@@ -29,7 +30,7 @@ export default function HistoryPage() {
   const groups = useMemo(() => groupByDate(filtered), [filtered]);
 
   const copyRecord = (r: (typeof mockHistory)[0]) => {
-    navigator.clipboard.writeText(
+    void writeAppClipboardText(
       formatAccountLine(
         r.username,
         r.password,

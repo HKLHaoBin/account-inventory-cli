@@ -1,0 +1,106 @@
+import type {
+  DashboardPayload,
+  FifoCommitPayload,
+  FifoPreviewPayload,
+  InboundCommitPayload,
+  InboundPreviewRow,
+  UpdateStatusPayload,
+} from "@/types/account";
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+
+async function requestJson<T>(
+  path: string,
+  options?: RequestInit
+): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options?.headers,
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `请求失败：${response.status}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export function fetchDashboard(): Promise<DashboardPayload> {
+  return requestJson<DashboardPayload>("/api/dashboard");
+}
+
+export async function previewInbound(
+  text: string
+): Promise<InboundPreviewRow[]> {
+  const payload = await requestJson<{ rows: InboundPreviewRow[] }>(
+    "/api/inbound/preview",
+    {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }
+  );
+  return payload.rows;
+}
+
+export function commitInbound(
+  rows: Pick<InboundPreviewRow, "clientId" | "line">[],
+  approvedPendingClientIds: string[]
+): Promise<InboundCommitPayload> {
+  return requestJson<InboundCommitPayload>("/api/inbound/commit", {
+    method: "POST",
+    body: JSON.stringify({ rows, approvedPendingClientIds }),
+  });
+}
+
+export function previewFifo(quantity: number): Promise<FifoPreviewPayload> {
+  return requestJson<FifoPreviewPayload>("/api/outbound/fifo/preview", {
+    method: "POST",
+    body: JSON.stringify({ quantity }),
+  });
+}
+
+export function commitFifo(quantity: number): Promise<FifoCommitPayload> {
+  return requestJson<FifoCommitPayload>("/api/outbound/fifo/commit", {
+    method: "POST",
+    body: JSON.stringify({ quantity }),
+  });
+}
+
+export function ignoreClipboardText(text: string): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>("/api/clipboard/ignore", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+export function fetchUpdateStatus(): Promise<UpdateStatusPayload> {
+  return requestJson<UpdateStatusPayload>("/api/runtime/update-status");
+}
+
+export function checkForUpdate(): Promise<UpdateStatusPayload> {
+  return requestJson<UpdateStatusPayload>("/api/runtime/check-update", {
+    method: "POST",
+  });
+}
+
+export function triggerUpdate(token: string): Promise<UpdateStatusPayload> {
+  return requestJson<UpdateStatusPayload>("/api/runtime/trigger-update", {
+    method: "POST",
+    headers: {
+      "X-Update-Token": token,
+    },
+  });
+}
+
+export async function writeAppClipboardText(text: string): Promise<void> {
+  await navigator.clipboard.writeText(text);
+  try {
+    await ignoreClipboardText(text);
+  } catch {
+    // Clipboard copy already succeeded; ignoring the watcher is best-effort.
+  }
+}

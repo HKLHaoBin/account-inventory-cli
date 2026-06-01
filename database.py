@@ -80,6 +80,30 @@ def count_inventory() -> int:
         return int(row["n"])
 
 
+def count_today_inbound() -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM accounts
+            WHERE date(created_at) = date('now', 'localtime')
+            """
+        ).fetchone()
+        return int(row["n"])
+
+
+def count_today_outbound() -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM outbound_records
+            WHERE date(outbound_at) = date('now', 'localtime')
+            """
+        ).fetchone()
+        return int(row["n"])
+
+
 def exists_in_inventory(username: str) -> bool:
     with _connect() as conn:
         row = conn.execute(
@@ -172,6 +196,7 @@ def insert_account(
 
 def _row_to_account_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
+        "id": row["id"],
         "username": row["username"],
         "password": row["password"],
         "email": row["email"],
@@ -193,7 +218,7 @@ def _search_table(
     with _connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT username, password, email, email_password, url
+            SELECT id, username, password, email, email_password, url
             FROM {table}
             WHERE username LIKE ? ESCAPE '\\'
                OR password LIKE ? ESCAPE '\\'
@@ -205,6 +230,64 @@ def _search_table(
             (pattern, pattern, pattern, pattern, pattern),
         ).fetchall()
     return [_row_to_account_dict(row) for row in rows]
+
+
+def list_inventory(limit: int | None = None) -> list[dict[str, Any]]:
+    sql = """
+        SELECT id, username, password, email, email_password, url, created_at
+        FROM accounts
+        ORDER BY created_at ASC, id ASC
+    """
+    params: tuple[Any, ...] = ()
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (limit,)
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [
+        {
+            **_row_to_account_dict(row),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def list_recent_activities(limit: int = 10) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT type, id, username, timestamp
+            FROM (
+                SELECT 'inbound' AS type, id, username, created_at AS timestamp
+                FROM accounts
+                UNION ALL
+                SELECT 'outbound' AS type, id, username, outbound_at AS timestamp
+                FROM outbound_records
+            )
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    return [
+        {
+            "id": f"{row['type']}-{row['id']}",
+            "type": row["type"],
+            "username": row["username"],
+            "timestamp": row["timestamp"],
+        }
+        for row in rows
+    ]
+
+
+def fifo_preview_many(count: int) -> list[dict[str, Any]]:
+    if count <= 0:
+        return []
+    return list_inventory(limit=count)
 
 
 def search_inventory(substring: str) -> list[dict[str, Any]]:

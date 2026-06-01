@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Minus, Plus, Copy, Check } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { mockInventory } from "@/lib/mock-data";
-import { formatAccountLine } from "@/lib/utils";
+import { commitFifo, previewFifo, writeAppClipboardText } from "@/lib/api";
+import type { Account } from "@/types/account";
 
 interface QuickOutboundModalProps {
   open: boolean;
@@ -19,34 +19,55 @@ export function QuickOutboundModal({
   onClose,
   onNavigate,
 }: QuickOutboundModalProps) {
-  const max = mockInventory.length;
   const [quantity, setQuantity] = useState(1);
   const [copied, setCopied] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [max, setMax] = useState(0);
+  const [preview, setPreview] = useState<Account[]>([]);
+  const [message, setMessage] = useState("");
 
   const clamped = Math.min(Math.max(quantity, 0), max);
-  const preview = mockInventory.slice(0, clamped);
+
+  useEffect(() => {
+    if (!open) return;
+    let ignore = false;
+    async function loadPreview() {
+      try {
+        const payload = await previewFifo(quantity);
+        if (ignore) return;
+        setMax(payload.max);
+        setPreview(payload.rows);
+        setMessage("");
+      } catch (error) {
+        if (ignore) return;
+        setMessage(error instanceof Error ? error.message : "FIFO 预览失败");
+      }
+    }
+    loadPreview();
+    return () => {
+      ignore = true;
+    };
+  }, [open, quantity]);
 
   const handleOutbound = async () => {
     if (clamped === 0) return;
-    const text = preview
-      .map((a) =>
-        formatAccountLine(
-          a.username,
-          a.password,
-          a.email,
-          a.emailPassword,
-          a.url
-        )
-      )
-      .join("\n");
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setSuccess(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      const payload = await commitFifo(quantity);
+      if (payload.clipboardText) {
+        await writeAppClipboardText(payload.clipboardText);
+      }
+      setMax(Math.max(0, payload.max - payload.quantity));
+      setPreview([]);
+      setCopied(true);
+      setSuccess(true);
+      setMessage("");
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "FIFO 出库失败");
+    }
   };
 
-  const chips = [1, 5, 10, max];
+  const chips = Array.from(new Set([1, 5, 10, max].filter((n) => n > 0)));
 
   return (
     <Modal
@@ -55,6 +76,7 @@ export function QuickOutboundModal({
         onClose();
         setSuccess(false);
         setQuantity(1);
+        setMessage("");
       }}
       title={success ? "出库成功" : "快捷 FIFO 出库"}
       description={
@@ -134,6 +156,10 @@ export function QuickOutboundModal({
             <p className="text-center text-sm text-amber-600">
               请求 {quantity}，实际出库 {max}
             </p>
+          )}
+
+          {message && (
+            <p className="text-center text-sm text-red-600">{message}</p>
           )}
 
           <div className="rounded-xl border border-border bg-muted/30 p-3">

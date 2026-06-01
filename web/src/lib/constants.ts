@@ -17,4 +17,10 @@ export const SHORTCUTS = [
   { key: "Esc", description: "清空搜索 / 关闭弹窗" },
   { key: "Ctrl+C", description: "复制选中行标准格式" },
   { key: "O", description: "打开快捷出库" },
+  { key: "I", description: "聚焦仪表盘批量入库输入框" },
+  { key: "F", description: "聚焦仪表盘 FIFO 数量" },
+  { key: "↑ / ↓", description: "在待确认入库项之间移动" },
+  { key: "Space / Enter", description: "切换当前待确认项批准状态" },
+  { key: "Y / N", description: "批准当前项 / 取消选中或当前项" },
+  { key: "Ctrl+Enter", description: "在入库输入框内提交当前批次" },
 ] as const;

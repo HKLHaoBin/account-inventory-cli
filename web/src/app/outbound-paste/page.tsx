@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { writeAppClipboardText } from "@/lib/api";
 import { parseLines } from "@/lib/parser";
 import {
   classifyOutboundLines,
@@ -68,7 +69,7 @@ export default function OutboundPastePage() {
       )
       .map((c) => c.line)
       .join("\n");
-    navigator.clipboard.writeText(failures);
+    void writeAppClipboardText(failures);
   };
 
   return (

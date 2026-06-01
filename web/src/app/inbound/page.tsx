@@ -13,6 +13,7 @@ import { Textarea } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
+import { writeAppClipboardText } from "@/lib/api";
 import { parseLines } from "@/lib/parser";
 import {
   classifyInboundLines,
@@ -92,7 +93,7 @@ export default function InboundPage() {
       .filter((c) => c.category !== "ready" && c.category !== "pending")
       .map((c) => c.line)
       .join("\n");
-    navigator.clipboard.writeText(failures);
+    void writeAppClipboardText(failures);
   };
 
   return (

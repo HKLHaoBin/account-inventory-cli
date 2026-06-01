@@ -855,6 +855,198 @@ def test_handle_entry_outbound_paste() -> None:
     assert db.exists_in_outbound("new")
 
 
+def _api_client():
+    from fastapi.testclient import TestClient
+
+    import api
+
+    return TestClient(api.app)
+
+
+def test_api_inbound_preview() -> None:
+    _reset_inventory()
+    db.insert_account("stocked", "p1")
+    db.insert_outbound_record("returned", "p2")
+    client = _api_client()
+
+    response = client.post(
+        "/api/inbound/preview",
+        json={
+            "text": "\n".join(
+                [
+                    "fresh----pw",
+                    "stocked----p1",
+                    "returned----p2",
+                    "bad-line",
+                    "fresh----again",
+                ]
+            )
+        },
+    )
+    assert response.status_code == 200
+    rows = response.json()["rows"]
+    assert [row["category"] for row in rows] == [
+        "ready",
+        "duplicate",
+        "pending",
+        "invalid",
+        "batchDuplicate",
+    ]
+
+
+def test_api_inbound_commit() -> None:
+    _reset_inventory()
+    db.insert_outbound_record("returned", "old")
+    client = _api_client()
+    preview = client.post(
+        "/api/inbound/preview",
+        json={"text": "fresh----pw\nreturned----pw2\nbad-line"},
+    ).json()["rows"]
+
+    response = client.post(
+        "/api/inbound/commit",
+        json={
+            "rows": [
+                {"clientId": row["clientId"], "line": row["line"]}
+                for row in preview
+            ],
+            "approvedPendingClientIds": ["line-2"],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["successCount"] == 2
+    assert payload["errorCount"] == 1
+    assert db.exists_in_inventory("fresh")
+    assert db.exists_in_inventory("returned")
+
+
+def test_api_fifo_preview_and_commit() -> None:
+    _reset_inventory()
+    db.insert_account("first", "p1")
+    db.insert_account("second", "p2")
+    client = _api_client()
+
+    preview = client.post("/api/outbound/fifo/preview", json={"quantity": 2})
+    assert preview.status_code == 200
+    assert [row["username"] for row in preview.json()["rows"]] == ["first", "second"]
+
+    committed = client.post("/api/outbound/fifo/commit", json={"quantity": 1})
+    assert committed.status_code == 200
+    payload = committed.json()
+    assert payload["quantity"] == 1
+    assert payload["clipboardText"] == "first----p1"
+    assert not db.exists_in_inventory("first")
+    assert db.exists_in_inventory("second")
+
+
+def test_api_clipboard_ignore() -> None:
+    import api
+
+    client = _api_client()
+    response = client.post("/api/clipboard/ignore", json={"text": "skip----pw"})
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert api._ignored_clipboard_text == "skip----pw"
+
+    response = client.post("/api/clipboard/ignore", json={"text": ""})
+    assert response.status_code == 200
+    assert api._ignored_clipboard_text is None
+
+
+def test_updater_version_compare() -> None:
+    import updater
+
+    assert updater.is_remote_newer("0.1.0", "v0.1.1")
+    assert not updater.is_remote_newer("0.1.1", "v0.1.1")
+    assert updater.is_remote_newer("0.0.0-dev", "v0.1.1")
+    assert not updater.is_remote_newer("0.1.1", "latest")
+
+
+def test_updater_release_assets() -> None:
+    import updater
+
+    release = {
+        "tag_name": "v0.2.0",
+        "assets": [
+            {
+                "name": "account-inventory-web-windows.zip",
+                "browser_download_url": "https://example.com/app.zip",
+            },
+            {
+                "name": "account-inventory-web-windows.zip.sha256",
+                "browser_download_url": "https://example.com/app.zip.sha256",
+            },
+        ],
+    }
+
+    assert updater.find_asset_url(release, updater.RELEASE_ZIP_NAME) == "https://example.com/app.zip"
+    assert updater.find_asset_url(release, updater.RELEASE_SHA256_NAME) == "https://example.com/app.zip.sha256"
+    assert updater.find_asset_url(release, "missing.zip") is None
+
+
+def test_updater_whitelist_blocks_data_and_source() -> None:
+    import updater
+
+    assert updater.is_allowed("account-inventory-web.exe")
+    assert updater.is_allowed("updater.exe")
+    assert updater.is_allowed("VERSION")
+    assert updater.is_allowed("start-web.bat")
+    assert updater.is_allowed("web/out/index.html")
+    assert not updater.is_allowed("data/accounts.db")
+    assert not updater.is_allowed(".updater.status.json")
+    assert not updater.is_allowed("api.py")
+    assert not updater.is_allowed("web/src/app/page.tsx")
+
+
+def test_update_trigger_token_guard() -> None:
+    import updater_runtime
+
+    (updater_runtime.ROOT / ".updater.status.json").unlink(missing_ok=True)
+    client = _api_client()
+    with mock.patch.dict("os.environ", {}, clear=False):
+        with mock.patch.dict("os.environ", {"UPDATE_ADMIN_TOKEN": ""}):
+            response = client.post("/api/runtime/trigger-update")
+            assert response.status_code == 403
+
+    with mock.patch.dict("os.environ", {"UPDATE_ADMIN_TOKEN": "secret"}):
+        response = client.post("/api/runtime/trigger-update", headers={"X-Update-Token": "bad"})
+        assert response.status_code == 403
+
+        with mock.patch.object(updater_runtime, "launch_update_once", return_value=1234):
+            response = client.post("/api/runtime/trigger-update", headers={"X-Update-Token": "secret"})
+            assert response.status_code == 200
+            assert response.json()["sidecar_pid"] == 1234
+
+
+def test_launch_update_once_command() -> None:
+    import updater_runtime
+
+    class DummyProcess:
+        pid = 4321
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "updater.py").write_text("print('x')", encoding="utf-8")
+        (root / "VERSION").write_text("0.1.0", encoding="utf-8")
+        updater_runtime.write_runtime_info("127.0.0.1", 8123, root)
+        with mock.patch.object(updater_runtime, "stop_update_watcher") as stop, mock.patch.object(
+            updater_runtime,
+            "_popen_detached",
+            return_value=DummyProcess(),
+        ) as popen:
+            pid = updater_runtime.launch_update_once(root)
+
+    assert pid == 4321
+    stop.assert_called_once()
+    command = popen.call_args.args[0]
+    assert "--restore-watch" in command
+    assert "--work-dir" in command
+    assert str(root) in command
+    assert "--port" in command
+    assert "8123" in command
+
+
 def run_all() -> tuple[int, list[str]]:
     failures: list[str] = []
     tests = [
@@ -912,6 +1104,15 @@ def run_all() -> tuple[int, list[str]]:
         ("process outbound batch mixed", test_process_outbound_batch_mixed),
         ("outbound paste mode stays after batch", test_outbound_paste_mode_stays_after_batch),
         ("handle entry outbound paste", test_handle_entry_outbound_paste),
+        ("api inbound preview", test_api_inbound_preview),
+        ("api inbound commit", test_api_inbound_commit),
+        ("api fifo preview and commit", test_api_fifo_preview_and_commit),
+        ("api clipboard ignore", test_api_clipboard_ignore),
+        ("updater version compare", test_updater_version_compare),
+        ("updater release assets", test_updater_release_assets),
+        ("updater whitelist", test_updater_whitelist_blocks_data_and_source),
+        ("update trigger token guard", test_update_trigger_token_guard),
+        ("launch update once command", test_launch_update_once_command),
     ]
     passed = 0
     for name, fn in tests:

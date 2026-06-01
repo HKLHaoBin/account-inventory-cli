@@ -12,11 +12,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [quickOpen, setQuickOpen] = useState(false);
 
   return (
-    <div className="flex h-screen max-w-[1440px] mx-auto overflow-hidden bg-background shadow-[0_0_60px_rgba(15,23,42,0.08)]">
+    <div className="flex h-screen w-screen overflow-hidden bg-background">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar onQuickOutbound={() => setQuickOpen(true)} />
-        <main className="flex-1 overflow-y-auto p-6">{children}</main>
+        <main className="flex-1 overflow-y-auto p-3 sm:p-4 lg:p-6">
+          {children}
+        </main>
         <StatusBar />
       </div>
       <QuickOutboundModal
