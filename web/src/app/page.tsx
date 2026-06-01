@@ -26,6 +26,7 @@ import {
   previewFifo,
   writeOutboundClipboardText,
 } from "@/lib/api";
+import { downloadTextFile } from "@/lib/download";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
 import { isClipboardMessage, getClipboardWsUrl } from "@/lib/ws";
 import { parseAccountLine, parseLines } from "@/lib/parser";
@@ -500,15 +501,23 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleFifoCommit() {
+  async function handleFifoCommit(mode: "clipboard" | "txt") {
     if (fifoPreview.quantity <= 0) return;
     setFifoBusy(true);
     try {
       const payload = await commitFifo(fifoQuantity);
       if (payload.clipboardText) {
-        await writeOutboundClipboardText(payload.clipboardText);
+        if (mode === "clipboard") {
+          await writeOutboundClipboardText(payload.clipboardText);
+        } else {
+          downloadTextFile(payload.clipboardText);
+        }
       }
-      setFifoMessage(`已出库 ${payload.quantity} 条并复制到剪贴板`);
+      setFifoMessage(
+        mode === "clipboard"
+          ? `已出库 ${payload.quantity} 条并复制到剪贴板`
+          : `已出库 ${payload.quantity} 条并下载 TXT`
+      );
       await loadDashboard();
     } catch (error) {
       setFifoMessage(error instanceof Error ? error.message : "FIFO 出库失败");
@@ -1022,14 +1031,25 @@ export default function DashboardPage() {
               </p>
             )}
 
-            <Button
-              className="w-full"
-              onClick={handleFifoCommit}
-              disabled={fifoBusy || fifoPreview.quantity === 0}
-            >
-              <Copy className="h-4 w-4" />
-              出库并复制 ({fifoPreview.quantity})
-            </Button>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Button
+                className="w-full"
+                onClick={() => handleFifoCommit("clipboard")}
+                disabled={fifoBusy || fifoPreview.quantity === 0}
+              >
+                <Copy className="h-4 w-4" />
+                出库并复制 ({fifoPreview.quantity})
+              </Button>
+              <Button
+                className="w-full"
+                variant="secondary"
+                onClick={() => handleFifoCommit("txt")}
+                disabled={fifoBusy || fifoPreview.quantity === 0}
+              >
+                <Download className="h-4 w-4" />
+                出库并下载 TXT
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>

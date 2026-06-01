@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Minus, Plus, Copy, Check, Package } from "lucide-react";
+import { Minus, Plus, Copy, Check, Package, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
 import { PasswordField } from "@/components/ui/password-field";
 import { writeOutboundClipboardText } from "@/lib/api";
+import { downloadTextFile } from "@/lib/download";
 import { mockInventory } from "@/lib/mock-data";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
 import Link from "next/link";
@@ -16,15 +17,15 @@ export default function OutboundPage() {
   const max = mockInventory.length;
   const [quantity, setQuantity] = useState(1);
   const [copied, setCopied] = useState(false);
+  const [resultMessage, setResultMessage] = useState("");
   const [resultOpen, setResultOpen] = useState(false);
 
   const clamped = Math.min(Math.max(quantity, 0), max);
   const preview = mockInventory.slice(0, clamped);
   const chips = [1, 5, 10, max];
 
-  const handleOutbound = async () => {
-    if (clamped === 0) return;
-    const text = preview
+  const outboundText = () =>
+    preview
       .map((a) =>
         formatAccountLine(
           a.username,
@@ -35,10 +36,24 @@ export default function OutboundPage() {
         )
       )
       .join("\n");
-    await writeOutboundClipboardText(text);
-    setCopied(true);
+
+  const handleOutbound = async (mode: "clipboard" | "txt") => {
+    if (clamped === 0) return;
+    const text = outboundText();
+    if (mode === "clipboard") {
+      await writeOutboundClipboardText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } else {
+      downloadTextFile(text);
+      setCopied(false);
+    }
+    setResultMessage(
+      mode === "clipboard"
+        ? `已出库 ${clamped} 条并复制到剪贴板`
+        : `已出库 ${clamped} 条并下载 TXT`
+    );
     setResultOpen(true);
-    setTimeout(() => setCopied(false), 2000);
   };
 
   if (max === 0) {
@@ -121,15 +136,27 @@ export default function OutboundPage() {
             </p>
           )}
 
-          <Button
-            className="w-full"
-            size="lg"
-            onClick={handleOutbound}
-            disabled={clamped === 0}
-          >
-            {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-            出库并复制到剪贴板
-          </Button>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Button
+              className="w-full"
+              size="lg"
+              onClick={() => handleOutbound("clipboard")}
+              disabled={clamped === 0}
+            >
+              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              出库并复制
+            </Button>
+            <Button
+              className="w-full"
+              variant="secondary"
+              size="lg"
+              onClick={() => handleOutbound("txt")}
+              disabled={clamped === 0}
+            >
+              <Download className="h-4 w-4" />
+              出库并下载 TXT
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
@@ -181,7 +208,7 @@ export default function OutboundPage() {
         open={resultOpen}
         onClose={() => setResultOpen(false)}
         title="出库成功"
-        description={`已出库 ${clamped} 条并复制到剪贴板`}
+        description={resultMessage}
         footer={
           <>
             <Button variant="secondary" onClick={() => { setResultOpen(false); setQuantity(1); }}>

@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Minus, Plus, Copy, Check } from "lucide-react";
+import { Minus, Plus, Copy, Check, Download } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { commitFifo, previewFifo, writeOutboundClipboardText } from "@/lib/api";
+import { downloadTextFile } from "@/lib/download";
 import type { Account } from "@/types/account";
 
 interface QuickOutboundModalProps {
@@ -22,6 +23,7 @@ export function QuickOutboundModal({
   const [quantity, setQuantity] = useState(1);
   const [copied, setCopied] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [successMessage, setSuccessMessage] = useState("");
   const [max, setMax] = useState(0);
   const [preview, setPreview] = useState<Account[]>([]);
   const [message, setMessage] = useState("");
@@ -49,22 +51,37 @@ export function QuickOutboundModal({
     };
   }, [open, quantity]);
 
-  const handleOutbound = async () => {
+  const handleOutbound = async (mode: "clipboard" | "txt") => {
     if (clamped === 0) return;
     try {
       const payload = await commitFifo(quantity);
       if (payload.clipboardText) {
-        await writeOutboundClipboardText(payload.clipboardText);
+        if (mode === "clipboard") {
+          await writeOutboundClipboardText(payload.clipboardText);
+        } else {
+          downloadTextFile(payload.clipboardText);
+        }
       }
       setMax(Math.max(0, payload.max - payload.quantity));
       setPreview([]);
-      setCopied(true);
+      setCopied(mode === "clipboard");
       setSuccess(true);
+      setSuccessMessage(
+        mode === "clipboard"
+          ? `已出库 ${payload.quantity} 条并复制到剪贴板`
+          : `已出库 ${payload.quantity} 条并下载 TXT`
+      );
       setMessage("");
       setTimeout(() => setCopied(false), 2000);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "FIFO 出库失败");
     }
+  };
+
+  const resetSuccess = () => {
+    setSuccess(false);
+    setSuccessMessage("");
+    setQuantity(1);
   };
 
   const chips = Array.from(new Set([1, 5, 10, max].filter((n) => n > 0)));
@@ -75,34 +92,43 @@ export function QuickOutboundModal({
       onClose={() => {
         onClose();
         setSuccess(false);
+        setSuccessMessage("");
         setQuantity(1);
         setMessage("");
       }}
       title={success ? "出库成功" : "快捷 FIFO 出库"}
       description={
         success
-          ? `已出库 ${clamped} 条并复制到剪贴板`
+          ? successMessage
           : `当前库存 ${max} 条，将按 FIFO 顺序出库`
       }
       className="max-w-md"
       footer={
         success ? (
           <>
-            <Button variant="secondary" onClick={() => { setSuccess(false); setQuantity(1); }}>
+            <Button variant="secondary" onClick={resetSuccess}>
               再次出库
             </Button>
-            <Button onClick={onClose}>完成</Button>
+            <Button onClick={() => { resetSuccess(); onClose(); }}>完成</Button>
           </>
         ) : (
-          <>
+          <div className="flex w-full flex-wrap justify-end gap-2">
             <Button variant="secondary" onClick={onNavigate}>
               前往出库页
             </Button>
-            <Button onClick={handleOutbound} disabled={max === 0 || clamped === 0}>
+            <Button
+              variant="secondary"
+              onClick={() => handleOutbound("txt")}
+              disabled={max === 0 || clamped === 0}
+            >
+              <Download className="h-4 w-4" />
+              下载 TXT
+            </Button>
+            <Button onClick={() => handleOutbound("clipboard")} disabled={max === 0 || clamped === 0}>
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               出库并复制
             </Button>
-          </>
+          </div>
         )
       }
     >
