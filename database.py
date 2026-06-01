@@ -209,6 +209,7 @@ def _search_table(
     table: str,
     substring: str,
     *,
+    columns: str,
     order_by: str,
 ) -> list[dict[str, Any]]:
     if not substring:
@@ -218,7 +219,7 @@ def _search_table(
     with _connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT id, username, password, email, email_password, url
+            SELECT {columns}
             FROM {table}
             WHERE username LIKE ? ESCAPE '\\'
                OR password LIKE ? ESCAPE '\\'
@@ -229,7 +230,7 @@ def _search_table(
             """,
             (pattern, pattern, pattern, pattern, pattern),
         ).fetchall()
-    return [_row_to_account_dict(row) for row in rows]
+    return [dict(row) for row in rows]
 
 
 def list_inventory(limit: int | None = None) -> list[dict[str, Any]]:
@@ -291,19 +292,39 @@ def fifo_preview_many(count: int) -> list[dict[str, Any]]:
 
 
 def search_inventory(substring: str) -> list[dict[str, Any]]:
-    return _search_table(
+    rows = _search_table(
         "accounts",
         substring,
+        columns="id, username, password, email, email_password, url, created_at",
         order_by="created_at ASC, id ASC",
     )
+    return [
+        {
+            **row,
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 
 def search_outbound_history(substring: str) -> list[dict[str, Any]]:
-    return _search_table(
+    rows = _search_table(
         "outbound_records",
         substring,
+        columns=(
+            "id, username, password, email, email_password, url, "
+            "inbound_at, outbound_at"
+        ),
         order_by="outbound_at DESC, id DESC",
     )
+    return [
+        {
+            **row,
+            "inbound_at": row["inbound_at"],
+            "outbound_at": row["outbound_at"],
+        }
+        for row in rows
+    ]
 
 
 def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
@@ -405,6 +426,131 @@ def outbound_by_username(username: str) -> dict[str, Any] | None:
             "url": row["url"],
             "created_at": row["created_at"],
         }
+
+
+def commit_outbound_paste_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+
+    usernames = [row["username"] for row in rows]
+    placeholders = ",".join("?" * len(usernames))
+
+    with _connect() as conn:
+        inventory_rows = conn.execute(
+            f"""
+            SELECT id, username, password, email, email_password, url, created_at
+            FROM accounts
+            WHERE username IN ({placeholders})
+            """,
+            usernames,
+        ).fetchall()
+        inventory_by_username = {row["username"]: row for row in inventory_rows}
+
+        outbound_rows = conn.execute(
+            f"""
+            SELECT DISTINCT username
+            FROM outbound_records
+            WHERE username IN ({placeholders})
+            """,
+            usernames,
+        ).fetchall()
+        outbound_usernames = {row["username"] for row in outbound_rows}
+        now = conn.execute("SELECT datetime('now', 'localtime') AS now").fetchone()["now"]
+
+        results: list[dict[str, Any]] = []
+        outbound_account_ids: list[int] = []
+        for item in rows:
+            username = item["username"]
+            inventory_row = inventory_by_username.get(username)
+            if inventory_row is not None:
+                conn.execute(
+                    """
+                    INSERT INTO outbound_records (
+                        username, password, email, email_password, url, inbound_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        inventory_row["username"],
+                        inventory_row["password"],
+                        inventory_row["email"],
+                        inventory_row["email_password"],
+                        inventory_row["url"],
+                        inventory_row["created_at"],
+                    ),
+                )
+                outbound_account_ids.append(inventory_row["id"])
+                results.append(
+                    {
+                        "client_id": item["client_id"],
+                        "line": item["line"],
+                        "category": "inInventory",
+                        "status": "success",
+                        "message": "出库成功",
+                        **_row_to_account_dict(inventory_row),
+                        "created_at": inventory_row["created_at"],
+                    }
+                )
+                continue
+
+            if username in outbound_usernames:
+                results.append(
+                    {
+                        "client_id": item["client_id"],
+                        "line": item["line"],
+                        "category": "inHistory",
+                        "status": "error",
+                        "message": "已在出库记录中",
+                        "username": username,
+                        "password": item["password"],
+                        "email": item["email"],
+                        "email_password": item["email_password"],
+                        "url": item["url"],
+                        "created_at": now,
+                    }
+                )
+                continue
+
+            conn.execute(
+                """
+                INSERT INTO outbound_records (
+                    username, password, email, email_password, url, inbound_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    item["password"],
+                    item["email"],
+                    item["email_password"],
+                    item["url"],
+                    now,
+                ),
+            )
+            results.append(
+                {
+                    "client_id": item["client_id"],
+                    "line": item["line"],
+                    "category": "notInInventory",
+                    "status": "success",
+                    "message": "已直接写入出库历史",
+                    "username": username,
+                    "password": item["password"],
+                    "email": item["email"],
+                    "email_password": item["email_password"],
+                    "url": item["url"],
+                    "created_at": now,
+                }
+            )
+
+        if outbound_account_ids:
+            delete_placeholders = ",".join("?" * len(outbound_account_ids))
+            conn.execute(
+                f"DELETE FROM accounts WHERE id IN ({delete_placeholders})",
+                outbound_account_ids,
+            )
+
+        return results
 
 
 def insert_outbound_record(

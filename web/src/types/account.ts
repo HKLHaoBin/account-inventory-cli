@@ -43,11 +43,27 @@ export type OutboundCategory =
   | "invalid"
   | "batchDuplicate";
 
+export type OutboundPasteCategory = OutboundCategory | "ready";
+
 export interface ClassifiedOutboundLine {
   line: string;
   category: OutboundCategory;
   reason?: string;
   account?: ParsedAccount;
+}
+
+export interface OutboundPasteRow {
+  clientId: string;
+  line: string;
+  username?: string | null;
+  password?: string | null;
+  email?: string | null;
+  emailPassword?: string | null;
+  url?: string | null;
+  category: OutboundPasteCategory;
+  status?: "success" | "error";
+  message?: string | null;
+  reason?: string | null;
 }
 
 export interface ActivityItem {
@@ -62,6 +78,10 @@ export interface SearchResult {
   source: "inventory" | "history";
   account: Account | OutboundRecord;
   matchedField: string;
+}
+
+export interface SearchPayload {
+  results: SearchResult[];
 }
 
 export interface DashboardPayload {
@@ -115,6 +135,18 @@ export interface FifoPreviewPayload {
 }
 
 export interface FifoCommitPayload extends FifoPreviewPayload {
+  clipboardText: string;
+}
+
+export interface OutboundByUsernamePayload {
+  account: Account;
+  clipboardText: string;
+}
+
+export interface OutboundPasteCommitPayload {
+  rows: OutboundPasteRow[];
+  successCount: number;
+  errorCount: number;
   clipboardText: string;
 }
 

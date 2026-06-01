@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -13,61 +13,15 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { writeAppClipboardText } from "@/lib/api";
-import { formatAccountLine } from "@/lib/utils";
-import { mockHistory, mockInventory } from "@/lib/mock-data";
+import {
+  outboundByUsername,
+  searchAccounts,
+  writeAppClipboardText,
+} from "@/lib/api";
 import type { SearchResult } from "@/types/account";
 
 interface TopBarProps {
   onQuickOutbound?: () => void;
-}
-
-function searchAccounts(query: string): SearchResult[] {
-  if (!query.trim()) return [];
-  const q = query.toLowerCase();
-  const results: SearchResult[] = [];
-
-  for (const account of mockInventory) {
-    const fields = [
-      account.username,
-      account.password,
-      account.email,
-      account.emailPassword,
-      account.url,
-    ].filter(Boolean) as string[];
-
-    const matched = fields.find((f) => f.toLowerCase().includes(q));
-    if (matched) {
-      results.push({
-        id: `inv-${account.id}`,
-        source: "inventory",
-        account,
-        matchedField: matched,
-      });
-    }
-  }
-
-  for (const record of mockHistory) {
-    const fields = [
-      record.username,
-      record.password,
-      record.email,
-      record.emailPassword,
-      record.url,
-    ].filter(Boolean) as string[];
-
-    const matched = fields.find((f) => f.toLowerCase().includes(q));
-    if (matched) {
-      results.push({
-        id: `hist-${record.id}`,
-        source: "history",
-        account: record,
-        matchedField: matched,
-      });
-    }
-  }
-
-  return results;
 }
 
 function highlightMatch(text: string, query: string) {
@@ -90,15 +44,40 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [results, setResults] = useState<SearchResult[]>([]);
-
-  const doSearch = useCallback((q: string) => {
-    setResults(searchAccounts(q));
-  }, []);
+  const [loading, setLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [outboundBusy, setOutboundBusy] = useState(false);
 
   useEffect(() => {
-    const timer = setTimeout(() => doSearch(query), 300);
-    return () => clearTimeout(timer);
-  }, [query, doSearch]);
+    const q = query.trim();
+    if (!q) return;
+
+    let ignore = false;
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      setSearchError("");
+      searchAccounts(q)
+        .then((payload) => {
+          if (ignore) return;
+          setResults(payload);
+        })
+        .catch((error) => {
+          if (ignore) return;
+          setResults([]);
+          setSearchError(
+            error instanceof Error ? error.message : "搜索失败"
+          );
+        })
+        .finally(() => {
+          if (!ignore) setLoading(false);
+        });
+    }, 300);
+
+    return () => {
+      ignore = true;
+      window.clearTimeout(timer);
+    };
+  }, [query]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -111,6 +90,9 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
       }
       if (e.key === "Escape") {
         setQuery("");
+        setResults([]);
+        setLoading(false);
+        setSearchError("");
         setOpen(false);
         inputRef.current?.blur();
       }
@@ -128,6 +110,29 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
   const historyResults = results.filter((r) => r.source === "history");
   const uniqueInventoryHit = inventoryResults.length === 1 && historyResults.length === 0;
 
+  const handleUniqueOutbound = async () => {
+    const hit = inventoryResults[0];
+    if (!hit || outboundBusy) return;
+
+    setOutboundBusy(true);
+    setSearchError("");
+    try {
+      const payload = await outboundByUsername(hit.account.username);
+      if (payload.clipboardText) {
+        await writeAppClipboardText(payload.clipboardText);
+      }
+      setResults([]);
+      setQuery("");
+      setOpen(false);
+    } catch (error) {
+      setSearchError(
+        error instanceof Error ? error.message : "出库失败"
+      );
+    } finally {
+      setOutboundBusy(false);
+    }
+  };
+
   return (
     <header className="flex h-16 shrink-0 items-center gap-4 border-b border-border bg-card/80 px-6 backdrop-blur-sm">
       <div className="flex items-center gap-2 lg:hidden">
@@ -141,7 +146,17 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
           ref={inputRef}
           value={query}
           onChange={(e) => {
-            setQuery(e.target.value);
+            const value = e.target.value;
+            setQuery(value);
+            if (!value.trim()) {
+              setResults([]);
+              setLoading(false);
+              setSearchError("");
+            } else {
+              setResults([]);
+              setLoading(true);
+              setSearchError("");
+            }
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
@@ -153,6 +168,9 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
             type="button"
             onClick={() => {
               setQuery("");
+              setResults([]);
+              setLoading(false);
+              setSearchError("");
               setOpen(false);
             }}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
@@ -161,9 +179,17 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
           </button>
         )}
 
-        {open && query && (
+        {open && query.trim() && (
           <div className="absolute left-0 right-0 top-full z-40 mt-2 overflow-hidden rounded-2xl border border-border bg-card shadow-[0_12px_40px_rgba(15,23,42,0.12)]">
-            {results.length === 0 ? (
+            {loading ? (
+              <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+                搜索中…
+              </p>
+            ) : searchError ? (
+              <p className="px-4 py-6 text-center text-sm text-red-600">
+                {searchError}
+              </p>
+            ) : results.length === 0 ? (
               <p className="px-4 py-6 text-center text-sm text-muted-foreground">
                 未找到匹配结果
               </p>
@@ -216,21 +242,10 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                     <Button
                       className="w-full"
                       size="sm"
-                      onClick={() => {
-                        const a = inventoryResults[0].account;
-                        void writeAppClipboardText(
-                          formatAccountLine(
-                            a.username,
-                            a.password,
-                            a.email,
-                            a.emailPassword,
-                            a.url
-                          )
-                        );
-                        setOpen(false);
-                      }}
+                      onClick={handleUniqueOutbound}
+                      disabled={outboundBusy}
                     >
-                      出库此账号并复制
+                      {outboundBusy ? "出库中…" : "出库此账号并复制"}
                     </Button>
                   </div>
                 )}

@@ -4,6 +4,11 @@ import type {
   FifoPreviewPayload,
   InboundCommitPayload,
   InboundPreviewRow,
+  OutboundByUsernamePayload,
+  OutboundPasteCommitPayload,
+  OutboundPasteRow,
+  SearchPayload,
+  SearchResult,
   UpdateStatusPayload,
 } from "@/types/account";
 
@@ -67,6 +72,31 @@ export function commitFifo(quantity: number): Promise<FifoCommitPayload> {
   return requestJson<FifoCommitPayload>("/api/outbound/fifo/commit", {
     method: "POST",
     body: JSON.stringify({ quantity }),
+  });
+}
+
+export async function searchAccounts(query: string): Promise<SearchResult[]> {
+  const payload = await requestJson<SearchPayload>(
+    `/api/search?q=${encodeURIComponent(query)}`
+  );
+  return payload.results;
+}
+
+export function outboundByUsername(
+  username: string
+): Promise<OutboundByUsernamePayload> {
+  return requestJson<OutboundByUsernamePayload>("/api/outbound/by-username", {
+    method: "POST",
+    body: JSON.stringify({ username }),
+  });
+}
+
+export function commitOutboundPaste(
+  rows: Pick<OutboundPasteRow, "clientId" | "line">[]
+): Promise<OutboundPasteCommitPayload> {
+  return requestJson<OutboundPasteCommitPayload>("/api/outbound-paste/commit", {
+    method: "POST",
+    body: JSON.stringify({ rows }),
   });
 }
 

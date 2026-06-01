@@ -1,63 +1,19 @@
 "use client";
 
-import { useMemo, Suspense } from "react";
+import { useCallback, useEffect, Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Copy, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
-import { writeAppClipboardText } from "@/lib/api";
-import { mockHistory, mockInventory } from "@/lib/mock-data";
+import {
+  outboundByUsername,
+  searchAccounts,
+  writeAppClipboardText,
+} from "@/lib/api";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
 import type { SearchResult } from "@/types/account";
-import { useState } from "react";
-
-function searchAccounts(query: string): SearchResult[] {
-  if (!query.trim()) return [];
-  const q = query.toLowerCase();
-  const results: SearchResult[] = [];
-
-  for (const account of mockInventory) {
-    const fields = [
-      account.username,
-      account.password,
-      account.email,
-      account.emailPassword,
-      account.url,
-    ].filter(Boolean) as string[];
-
-    if (fields.some((f) => f.toLowerCase().includes(q))) {
-      results.push({
-        id: `inv-${account.id}`,
-        source: "inventory",
-        account,
-        matchedField: account.username,
-      });
-    }
-  }
-
-  for (const record of mockHistory) {
-    const fields = [
-      record.username,
-      record.password,
-      record.email,
-      record.emailPassword,
-      record.url,
-    ].filter(Boolean) as string[];
-
-    if (fields.some((f) => f.toLowerCase().includes(q))) {
-      results.push({
-        id: `hist-${record.id}`,
-        source: "history",
-        account: record,
-        matchedField: record.username,
-      });
-    }
-  }
-
-  return results;
-}
 
 function highlight(text: string, query: string) {
   const idx = text.toLowerCase().indexOf(query.toLowerCase());
@@ -77,8 +33,11 @@ function SearchContent() {
   const searchParams = useSearchParams();
   const query = searchParams.get("q") || "";
   const [tab, setTab] = useState<"all" | "inventory" | "history">("all");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [outboundUsername, setOutboundUsername] = useState("");
 
-  const results = useMemo(() => searchAccounts(query), [query]);
   const inventoryResults = results.filter((r) => r.source === "inventory");
   const historyResults = results.filter((r) => r.source === "history");
   const uniqueInventoryHit =
@@ -90,6 +49,46 @@ function SearchContent() {
       : tab === "inventory"
         ? inventoryResults
         : historyResults;
+
+  const loadResults = useCallback(
+    async (ignoreResult?: () => boolean) => {
+      const q = query.trim();
+      if (!q) {
+        setResults([]);
+        setError("");
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      setError("");
+      try {
+        const payload = await searchAccounts(q);
+        if (ignoreResult?.()) return;
+        setResults(payload);
+      } catch (requestError) {
+        if (ignoreResult?.()) return;
+        setResults([]);
+        setError(
+          requestError instanceof Error ? requestError.message : "搜索失败"
+        );
+      } finally {
+        if (!ignoreResult?.()) setLoading(false);
+      }
+    },
+    [query]
+  );
+
+  useEffect(() => {
+    let ignore = false;
+    const timer = window.setTimeout(() => {
+      void loadResults(() => ignore);
+    }, 0);
+    return () => {
+      ignore = true;
+      window.clearTimeout(timer);
+    };
+  }, [loadResults]);
 
   const copyResult = (r: SearchResult) => {
     const a = r.account;
@@ -104,6 +103,25 @@ function SearchContent() {
     );
   };
 
+  const outboundResult = async (r: SearchResult) => {
+    if (r.source !== "inventory" || outboundUsername) return;
+    setOutboundUsername(r.account.username);
+    setError("");
+    try {
+      const payload = await outboundByUsername(r.account.username);
+      if (payload.clipboardText) {
+        await writeAppClipboardText(payload.clipboardText);
+      }
+      await loadResults();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : "出库失败"
+      );
+    } finally {
+      setOutboundUsername("");
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div>
@@ -111,7 +129,7 @@ function SearchContent() {
         <p className="mt-1 text-sm text-muted-foreground">
           {query ? (
             <>
-              关键词「{query}」— 共 {results.length} 条结果
+              关键词「{query}」- 共 {results.length} 条结果
             </>
           ) : (
             "请在顶部搜索框输入关键词"
@@ -144,7 +162,21 @@ function SearchContent() {
             ))}
           </div>
 
-          {filtered.length === 0 ? (
+          {error && (
+            <Card className="border-red-200 bg-red-50">
+              <CardContent className="py-3 text-sm text-red-700">
+                {error}
+              </CardContent>
+            </Card>
+          )}
+
+          {loading ? (
+            <Card>
+              <CardContent className="py-12 text-center text-muted-foreground">
+                搜索中…
+              </CardContent>
+            </Card>
+          ) : filtered.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center text-muted-foreground">
                 未找到匹配结果
@@ -189,6 +221,18 @@ function SearchContent() {
                         <Copy className="h-4 w-4" />
                         复制
                       </Button>
+                      {r.source === "inventory" && (
+                        <Button
+                          size="sm"
+                          onClick={() => void outboundResult(r)}
+                          disabled={Boolean(outboundUsername)}
+                        >
+                          <Upload className="h-4 w-4" />
+                          {outboundUsername === r.account.username
+                            ? "出库中…"
+                            : "出库"}
+                        </Button>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
@@ -204,10 +248,11 @@ function SearchContent() {
                       </p>
                     </div>
                     <Button
-                      onClick={() => copyResult(inventoryResults[0])}
+                      onClick={() => void outboundResult(inventoryResults[0])}
+                      disabled={Boolean(outboundUsername)}
                     >
                       <Upload className="h-4 w-4" />
-                      出库此账号
+                      {outboundUsername ? "出库中…" : "出库此账号"}
                     </Button>
                   </CardContent>
                 </Card>

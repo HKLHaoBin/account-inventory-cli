@@ -940,6 +940,136 @@ def test_api_fifo_preview_and_commit() -> None:
     assert db.exists_in_inventory("second")
 
 
+def test_api_search_inventory_and_history() -> None:
+    _reset_inventory()
+    db.insert_account(
+        "stock_search",
+        "p1",
+        email="stock@mail.test",
+        url="https://stock.example",
+    )
+    db.insert_account(
+        "history_search",
+        "p2",
+        email="history@mail.test",
+        url="https://history.example",
+    )
+    db.outbound_by_username("history_search")
+    client = _api_client()
+
+    stock_response = client.get("/api/search", params={"q": "stock@mail"})
+    assert stock_response.status_code == 200
+    stock_results = stock_response.json()["results"]
+    assert len(stock_results) == 1
+    assert stock_results[0]["source"] == "inventory"
+    assert stock_results[0]["account"]["username"] == "stock_search"
+    assert stock_results[0]["account"]["inboundAt"]
+
+    history_response = client.get("/api/search", params={"q": "history.example"})
+    assert history_response.status_code == 200
+    history_results = history_response.json()["results"]
+    assert len(history_results) == 1
+    assert history_results[0]["source"] == "history"
+    assert history_results[0]["account"]["username"] == "history_search"
+    assert history_results[0]["account"]["inboundAt"]
+    assert history_results[0]["account"]["outboundAt"]
+
+    empty_response = client.get("/api/search", params={"q": ""})
+    assert empty_response.status_code == 200
+    assert empty_response.json()["results"] == []
+
+    db.insert_account("100%api", "p3")
+    like_response = client.get("/api/search", params={"q": "%api"})
+    assert like_response.status_code == 200
+    like_results = like_response.json()["results"]
+    assert len(like_results) == 1
+    assert like_results[0]["account"]["username"] == "100%api"
+
+
+def test_api_outbound_by_username() -> None:
+    _reset_inventory()
+    db.insert_account("target", "pw", email="target@mail.test")
+    client = _api_client()
+
+    response = client.post(
+        "/api/outbound/by-username",
+        json={"username": "target"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account"]["username"] == "target"
+    assert payload["clipboardText"] == "target----pw----target@mail.test----"
+    assert not db.exists_in_inventory("target")
+    assert db.exists_in_outbound("target")
+    assert db.count_outbound_records() == 1
+
+    missing_response = client.post(
+        "/api/outbound/by-username",
+        json={"username": "target"},
+    )
+    assert missing_response.status_code == 404
+    assert db.count_outbound_records() == 1
+
+
+def test_api_outbound_paste_commit() -> None:
+    _reset_inventory()
+    db.insert_account("stocked", "stock_pw", email="stock@mail.test")
+    db.insert_outbound_record("old", "old_pw")
+    client = _api_client()
+
+    response = client.post(
+        "/api/outbound-paste/commit",
+        json={
+            "rows": [
+                {"clientId": "line-1", "line": "stocked----typed_pw"},
+                {"clientId": "line-2", "line": "direct----direct_pw----d@mail.test"},
+                {"clientId": "line-3", "line": "old----old_pw"},
+                {"clientId": "line-4", "line": "bad-line"},
+                {"clientId": "line-5", "line": "direct----again"},
+            ]
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["successCount"] == 2
+    assert payload["errorCount"] == 3
+
+    rows = {row["clientId"]: row for row in payload["rows"]}
+    assert rows["line-1"]["status"] == "success"
+    assert rows["line-1"]["category"] == "inInventory"
+    assert rows["line-1"]["password"] == "stock_pw"
+    assert rows["line-2"]["status"] == "success"
+    assert rows["line-2"]["category"] == "notInInventory"
+    assert rows["line-3"]["status"] == "error"
+    assert rows["line-3"]["category"] == "inHistory"
+    assert rows["line-4"]["status"] == "error"
+    assert rows["line-4"]["category"] == "invalid"
+    assert rows["line-5"]["status"] == "error"
+    assert rows["line-5"]["category"] == "batchDuplicate"
+    assert payload["clipboardText"] == "\n".join(
+        [
+            "stocked----stock_pw----stock@mail.test----",
+            "direct----direct_pw----d@mail.test----",
+        ]
+    )
+
+    assert not db.exists_in_inventory("stocked")
+    assert db.exists_in_outbound("stocked")
+    assert db.exists_in_outbound("direct")
+    assert db.count_outbound_records() == 3
+
+    repeat = client.post(
+        "/api/outbound-paste/commit",
+        json={"rows": [{"clientId": "line-1", "line": "stocked----stock_pw"}]},
+    )
+    assert repeat.status_code == 200
+    repeat_payload = repeat.json()
+    assert repeat_payload["successCount"] == 0
+    assert repeat_payload["errorCount"] == 1
+    assert repeat_payload["rows"][0]["category"] == "inHistory"
+    assert db.count_outbound_records() == 3
+
+
 def test_api_clipboard_ignore() -> None:
     import api
 
@@ -1107,6 +1237,9 @@ def run_all() -> tuple[int, list[str]]:
         ("api inbound preview", test_api_inbound_preview),
         ("api inbound commit", test_api_inbound_commit),
         ("api fifo preview and commit", test_api_fifo_preview_and_commit),
+        ("api search inventory and history", test_api_search_inventory_and_history),
+        ("api outbound by username", test_api_outbound_by_username),
+        ("api outbound paste commit", test_api_outbound_paste_commit),
         ("api clipboard ignore", test_api_clipboard_ignore),
         ("updater version compare", test_updater_version_compare),
         ("updater release assets", test_updater_release_assets),

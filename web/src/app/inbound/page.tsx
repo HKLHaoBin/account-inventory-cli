@@ -1,32 +1,27 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ClipboardPaste,
-  Trash2,
-  FileText,
   Check,
+  ClipboardPaste,
   Copy,
+  FileText,
+  Trash2,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Modal } from "@/components/ui/modal";
-import { writeAppClipboardText } from "@/lib/api";
-import { parseLines } from "@/lib/parser";
-import {
-  classifyInboundLines,
-  INBOUND_CATEGORY_META,
-} from "@/lib/classification";
-import {
-  getInventoryUsernames,
-  getOutboundUsernames,
-  getOutboundTimes,
-  SAMPLE_FORMAT,
-} from "@/lib/mock-data";
-import { formatDateTime } from "@/lib/utils";
-import type { ClassifiedInboundLine, InboundCategory } from "@/types/account";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/input";
+import { commitInbound, writeAppClipboardText } from "@/lib/api";
+import { parseAccountLine, parseLines } from "@/lib/parser";
+import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
+import { cn, formatDateTime, maskValue } from "@/lib/utils";
+import { SAMPLE_FORMAT } from "@/lib/mock-data";
+import type {
+  InboundCategory,
+  InboundCommitResultRow,
+  InboundPreviewRow,
+} from "@/types/account";
 
 const DEMO_TEXT = `new_user_a----PassA123----newa@mail.com----MailA----https://new.example.com
 alpha_user01----DupPass----dup@test.com
@@ -35,269 +30,355 @@ badline-only-one-field
 new_user_b----PassB456
 returned_user----BatchDup----dup2@test.com`;
 
+const CATEGORY_LABELS: Record<InboundCategory, string> = {
+  ready: "待检测",
+  duplicate: "库存重复",
+  pending: "曾出库待确认",
+  invalid: "格式错误",
+  batchDuplicate: "批次内重复",
+};
+
+function categoryBadge(category: InboundCategory) {
+  if (category === "ready") return "success";
+  if (category === "pending") return "warning";
+  if (category === "duplicate" || category === "batchDuplicate") return "error";
+  return "secondary";
+}
+
+function isCommitResult(
+  row: InboundPreviewRow | InboundCommitResultRow
+): row is InboundCommitResultRow {
+  return "status" in row;
+}
+
+function rowTone(row: InboundPreviewRow | InboundCommitResultRow) {
+  if (isCommitResult(row)) {
+    if (row.status === "success") return "bg-emerald-50/80 dark:bg-emerald-950/25";
+    if (row.status === "warning") return "bg-amber-50/80 dark:bg-amber-950/25";
+    if (row.status === "error") return "bg-red-50/80 dark:bg-red-950/20";
+  }
+  if (row.category === "invalid") return "bg-muted/40";
+  return "bg-muted/20";
+}
+
+function buildDraftRows(text: string): InboundPreviewRow[] {
+  return parseLines(text).map((line, index) => {
+    const clientId = `line-${index + 1}`;
+    try {
+      const account = parseAccountLine(line);
+      return {
+        clientId,
+        line,
+        username: account.username,
+        password: account.password,
+        email: account.email,
+        emailPassword: account.emailPassword,
+        url: account.url,
+        category: "ready",
+        reason: "确认入库后统一检测账号状态",
+      };
+    } catch (error) {
+      return {
+        clientId,
+        line,
+        category: "invalid",
+        reason: error instanceof Error ? error.message : "格式错误",
+      };
+    }
+  });
+}
+
+function displayMessage(row: InboundPreviewRow | InboundCommitResultRow) {
+  if (isCommitResult(row)) return row.message;
+  if (row.lastOutboundAt) return `最近出库：${formatDateTime(row.lastOutboundAt)}`;
+  return row.reason ?? "-";
+}
+
 export default function InboundPage() {
+  const wsTimerRef = useRef<number | null>(null);
+  const textRef = useRef("");
+  const resultRowsRef = useRef<Map<string, InboundCommitResultRow>>(new Map());
   const [text, setText] = useState("");
-  const [pendingOpen, setPendingOpen] = useState(false);
-  const [approvedPending, setApprovedPending] = useState<Set<string>>(new Set());
-  const [success, setSuccess] = useState(false);
+  const [draftRows, setDraftRows] = useState<InboundPreviewRow[]>([]);
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
+  const [approvedPendingIds, setApprovedPendingIds] = useState<Set<string>>(
+    new Set()
+  );
+  const [resultRows, setResultRows] = useState<Map<string, InboundCommitResultRow>>(
+    new Map()
+  );
+  const [clipboardState, setClipboardState] = useState("连接剪贴板检测中");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
 
-  const lines = useMemo(() => parseLines(text), [text]);
+  const resetForText = useCallback((value: string) => {
+    textRef.current = value;
+    resultRowsRef.current = new Map();
+    setText(value);
+    setDraftRows(buildDraftRows(value));
+    setDeletedIds(new Set());
+    setApprovedPendingIds(new Set());
+    setResultRows(new Map());
+    setMessage("");
+  }, []);
 
-  const classified = useMemo(() => {
-    return classifyInboundLines(lines, {
-      inventoryUsernames: getInventoryUsernames(),
-      outboundUsernames: getOutboundUsernames(),
-      outboundTimes: getOutboundTimes(),
-    });
-  }, [lines]);
+  const appendText = useCallback((value: string) => {
+    const nextValue = value.trim();
+    if (!nextValue) return;
+    const currentValue = textRef.current.trimEnd();
+    resetForText(currentValue ? `${currentValue}\n${nextValue}` : nextValue);
+  }, [resetForText]);
 
-  const grouped = useMemo(() => {
-    const groups: Record<InboundCategory, ClassifiedInboundLine[]> = {
-      ready: [],
-      duplicate: [],
-      pending: [],
-      invalid: [],
-      batchDuplicate: [],
+  useEffect(() => {
+    let socket: WebSocket | null = null;
+    let stopped = false;
+
+    const connect = () => {
+      socket = new WebSocket(getClipboardWsUrl());
+      socket.onopen = () => setClipboardState("剪贴板检测已连接");
+      socket.onmessage = (event) => {
+        try {
+          const value = JSON.parse(event.data) as unknown;
+          if (!isClipboardMessage(value)) return;
+          if (resultRowsRef.current.size > 0) resetForText(value.text);
+          else appendText(value.text);
+          setClipboardState(
+            `已从剪贴板载入 ${value.validLines.length} 条，剔除 ${value.rejectedCount} 条`
+          );
+        } catch {
+          setClipboardState("剪贴板消息解析失败");
+        }
+      };
+      socket.onclose = () => {
+        if (stopped) return;
+        setClipboardState("剪贴板检测重连中");
+        wsTimerRef.current = window.setTimeout(connect, 2000);
+      };
+      socket.onerror = () => {
+        setClipboardState("剪贴板检测连接失败");
+        socket?.close();
+      };
     };
-    for (const item of classified) {
-      groups[item.category].push(item);
+
+    connect();
+    return () => {
+      stopped = true;
+      if (wsTimerRef.current !== null) window.clearTimeout(wsTimerRef.current);
+      socket?.close();
+    };
+  }, [appendText, resetForText]);
+
+  const displayedRows = useMemo(
+    () =>
+      draftRows
+        .filter((row) => !deletedIds.has(row.clientId))
+        .map((row) => resultRows.get(row.clientId) ?? row),
+    [deletedIds, draftRows, resultRows]
+  );
+
+  const counts = useMemo(() => {
+    return displayedRows.reduce(
+      (acc, row) => {
+        acc[row.category] += 1;
+        return acc;
+      },
+      {
+        ready: 0,
+        duplicate: 0,
+        pending: 0,
+        invalid: 0,
+        batchDuplicate: 0,
+      } as Record<InboundCategory, number>
+    );
+  }, [displayedRows]);
+
+  const commitRows = displayedRows
+    .filter((row) => !isCommitResult(row) || row.status === "warning")
+    .map((row) => ({ clientId: row.clientId, line: row.line }));
+  const approvedCount = counts.ready + approvedPendingIds.size;
+
+  async function handleConfirm() {
+    if (commitRows.length === 0) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const payload = await commitInbound(commitRows, Array.from(approvedPendingIds));
+      const nextRows = new Map(payload.rows.map((row) => [row.clientId, row]));
+      resultRowsRef.current = nextRows;
+      setResultRows(nextRows);
+      setMessage(
+        `入库完成：成功 ${payload.successCount} 条，失败 ${payload.errorCount} 条，待确认 ${payload.warningCount} 条`
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "入库提交失败");
+    } finally {
+      setBusy(false);
     }
-    return groups;
-  }, [classified]);
+  }
 
-  const readyCount = grouped.ready.length;
-  const pendingItems = grouped.pending;
-  const hasPending = pendingItems.length > 0;
-  const approvedReady =
-    readyCount +
-    pendingItems.filter((p) => approvedPending.has(p.line)).length;
-
-  const borderColor =
-    lines.length === 0
-      ? "border-border"
-      : grouped.invalid.length > 0 || grouped.duplicate.length > 0
-        ? "border-red-300 dark:border-red-800"
-        : "border-emerald-300 dark:border-emerald-800";
-
-  const handleConfirm = () => {
-    if (hasPending && approvedPending.size < pendingItems.length) {
-      setPendingOpen(true);
-      return;
-    }
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 3000);
-  };
-
-  const copyFailures = () => {
-    const failures = classified
-      .filter((c) => c.category !== "ready" && c.category !== "pending")
-      .map((c) => c.line)
+  function copyFailures() {
+    const failures = displayedRows
+      .filter(
+        (row) =>
+          row.category === "invalid" ||
+          row.category === "duplicate" ||
+          row.category === "batchDuplicate" ||
+          (isCommitResult(row) && row.status === "error")
+      )
+      .map((row) => row.line)
       .join("\n");
-    void writeAppClipboardText(failures);
-  };
+    if (failures) void writeAppClipboardText(failures);
+  }
 
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">入库</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          粘贴多行账号，实时分类预览
+          粘贴多行账号，确认后统一检测库存和出库历史
         </p>
+        <p className="mt-1 text-xs text-muted-foreground">{clipboardState}</p>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[3fr_2fr]">
-        <Card className="flex flex-col">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base">输入区</CardTitle>
-            <div className="flex gap-2">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => navigator.clipboard.readText().then(setText)}
-              >
-                <ClipboardPaste className="h-4 w-4" />
-                从剪贴板粘贴
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => setText("")}>
-                <Trash2 className="h-4 w-4" />
-                清空
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setText(SAMPLE_FORMAT)}
-              >
-                <FileText className="h-4 w-4" />
-                示例格式
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setText(DEMO_TEXT)}
-              >
-                演示数据
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="flex flex-1 flex-col">
-            <Textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="粘贴账号行，每行一条&#10;格式：账号----密码----邮箱----邮箱密码----网址"
-              className={`min-h-[360px] flex-1 font-mono text-xs ${borderColor} border-2`}
-            />
-            <p className="mt-2 text-xs text-muted-foreground">
-              共 {lines.length} 行 ·{" "}
-              {grouped.invalid.length > 0
-                ? `${grouped.invalid.length} 行格式错误`
-                : "语法校验通过"}
-            </p>
-          </CardContent>
-        </Card>
+      <Card>
+        <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between sm:space-y-0">
+          <CardTitle className="text-base">输入区</CardTitle>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => navigator.clipboard.readText().then(resetForText)}
+            >
+              <ClipboardPaste className="h-4 w-4" />
+              从剪贴板粘贴
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => resetForText("")}>
+              <Trash2 className="h-4 w-4" />
+              清空
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => resetForText(SAMPLE_FORMAT)}>
+              <FileText className="h-4 w-4" />
+              示例格式
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => resetForText(DEMO_TEXT)}>
+              演示数据
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Textarea
+            value={text}
+            onChange={(event) => resetForText(event.target.value)}
+            placeholder="粘贴账号行，每行一条&#10;格式：账号----密码----邮箱----邮箱密码----网址"
+            className="min-h-[180px] font-mono text-xs"
+          />
 
-        <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">分类预览</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {(Object.keys(INBOUND_CATEGORY_META) as InboundCategory[]).map(
-                (cat) => {
-                  const meta = INBOUND_CATEGORY_META[cat];
-                  const items = grouped[cat];
-                  return (
-                    <div
-                      key={cat}
-                      className={`rounded-xl border p-3 ${meta.bg} dark:bg-opacity-20`}
+          <div className="flex flex-wrap gap-2">
+            {(Object.keys(CATEGORY_LABELS) as InboundCategory[]).map((category) => (
+              <Badge key={category} variant={categoryBadge(category)}>
+                {CATEGORY_LABELS[category]} {counts[category]}
+              </Badge>
+            ))}
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-muted/40">
+                  <th className="w-10 px-3 py-2.5 text-left font-medium">确认</th>
+                  <th className="px-3 py-2.5 text-left font-medium">状态</th>
+                  <th className="px-3 py-2.5 text-left font-medium">账号</th>
+                  <th className="px-3 py-2.5 text-left font-medium">密码</th>
+                  <th className="px-3 py-2.5 text-left font-medium">邮箱</th>
+                  <th className="px-3 py-2.5 text-left font-medium">网址</th>
+                  <th className="px-3 py-2.5 text-left font-medium">信息</th>
+                  <th className="w-12 px-3 py-2.5 text-left font-medium">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayedRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">
+                      输入账号文本后会转换为表格
+                    </td>
+                  </tr>
+                ) : (
+                  displayedRows.map((row) => (
+                    <tr
+                      key={row.clientId}
+                      className={cn("border-b border-border last:border-0", rowTone(row))}
                     >
-                      <div className="flex items-center justify-between">
-                        <span className={`text-sm font-medium ${meta.color}`}>
-                          {meta.label}
-                        </span>
-                        <Badge variant="secondary">{items.length}</Badge>
-                      </div>
-                      {items.length > 0 && (
-                        <div className="mt-2 max-h-24 space-y-1 overflow-y-auto">
-                          {items.slice(0, 5).map((item) => (
-                            <p
-                              key={item.line}
-                              className="truncate font-mono text-[11px] text-muted-foreground"
-                              title={item.reason || item.line}
-                            >
-                              {item.account?.username || item.line.slice(0, 40)}
-                              {item.reason && (
-                                <span className="ml-1 text-red-600">
-                                  — {item.reason}
-                                </span>
-                              )}
-                            </p>
-                          ))}
-                          {items.length > 5 && (
-                            <p className="text-[11px] text-muted-foreground">
-                              +{items.length - 5} 条更多
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+                      <td className="px-3 py-2.5">
+                        {row.category === "pending" ? (
+                          <input
+                            type="checkbox"
+                            checked={approvedPendingIds.has(row.clientId)}
+                            onChange={(event) => {
+                              setApprovedPendingIds((prev) => {
+                                const next = new Set(prev);
+                                if (event.target.checked) next.add(row.clientId);
+                                else next.delete(row.clientId);
+                                return next;
+                              });
+                            }}
+                            aria-label={`批准 ${row.username ?? row.line}`}
+                          />
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <Badge variant={categoryBadge(row.category)}>
+                          {CATEGORY_LABELS[row.category]}
+                        </Badge>
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-xs">
+                        {row.username ?? row.line}
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-xs">
+                        {row.password ? maskValue(row.password) : "-"}
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-xs">
+                        {row.email ?? "-"}
+                      </td>
+                      <td className="max-w-[220px] truncate px-3 py-2.5 font-mono text-xs">
+                        {row.url ?? "-"}
+                      </td>
+                      <td className="px-3 py-2.5 text-xs text-muted-foreground">
+                        {displayMessage(row)}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() =>
+                            setDeletedIds((prev) => new Set(prev).add(row.clientId))
+                          }
+                          aria-label="删除条目"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-card p-4 shadow-sm">
-        <Button onClick={handleConfirm} disabled={readyCount === 0 && !hasPending}>
+        <Button onClick={handleConfirm} disabled={busy || commitRows.length === 0}>
           <Check className="h-4 w-4" />
-          确认入库 ({approvedReady || readyCount})
+          确认入库 ({approvedCount})
         </Button>
-        {hasPending && (
-          <Button variant="secondary" onClick={() => setPendingOpen(true)}>
-            待确认 ({pendingItems.length})
-          </Button>
-        )}
-        <Button
-          variant="outline"
-          onClick={copyFailures}
-          disabled={
-            grouped.duplicate.length +
-              grouped.invalid.length +
-              grouped.batchDuplicate.length ===
-            0
-          }
-        >
+        <Button variant="outline" onClick={copyFailures} disabled={displayedRows.length === 0}>
           <Copy className="h-4 w-4" />
           复制失败行
         </Button>
-        {success && (
-          <span className="flex items-center gap-1 text-sm text-emerald-600">
-            <Check className="h-4 w-4" /> 入库成功（演示）
-          </span>
-        )}
+        {message && <span className="text-sm text-muted-foreground">{message}</span>}
       </div>
-
-      <Modal
-        open={pendingOpen}
-        onClose={() => setPendingOpen(false)}
-        title="曾出库账号 — 待确认"
-        description="以下账号曾在出库历史中出现，请勾选批准重新入库"
-        className="max-w-lg"
-        footer={
-          <>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setApprovedPending(new Set(pendingItems.map((p) => p.line)));
-                setPendingOpen(false);
-              }}
-            >
-              全部批准
-            </Button>
-            <Button
-              onClick={() => {
-                setPendingOpen(false);
-                setSuccess(true);
-              }}
-              disabled={approvedPending.size === 0}
-            >
-              批准选中 ({approvedPending.size})
-            </Button>
-          </>
-        }
-      >
-        <div className="max-h-64 space-y-2 overflow-y-auto">
-          {pendingItems.map((item) => (
-            <label
-              key={item.line}
-              className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-muted/50"
-            >
-              <input
-                type="checkbox"
-                checked={approvedPending.has(item.line)}
-                onChange={(e) => {
-                  setApprovedPending((prev) => {
-                    const next = new Set(prev);
-                    if (e.target.checked) next.add(item.line);
-                    else next.delete(item.line);
-                    return next;
-                  });
-                }}
-                className="mt-1"
-              />
-              <div>
-                <p className="font-mono text-sm">{item.account?.username}</p>
-                {item.lastOutboundAt && (
-                  <p className="text-xs text-muted-foreground">
-                    最近出库：{formatDateTime(item.lastOutboundAt)}
-                  </p>
-                )}
-              </div>
-            </label>
-          ))}
-        </div>
-      </Modal>
     </div>
   );
 }

@@ -244,6 +244,7 @@ function ActivitiesList({ activities }: { activities: ActivityItem[] }) {
 export default function DashboardPage() {
   const wsTimerRef = useRef<number | null>(null);
   const inboundTextRef = useRef("");
+  const resultRowsRef = useRef<Map<string, InboundCommitResultRow>>(new Map());
   const inboundTextareaRef = useRef<HTMLTextAreaElement>(null);
   const fifoQuantityRef = useRef<HTMLInputElement>(null);
   const [dashboard, setDashboard] = useState<DashboardPayload>(EMPTY_DASHBOARD);
@@ -273,6 +274,7 @@ export default function DashboardPage() {
 
   function replaceInboundText(value: string) {
     inboundTextRef.current = value;
+    resultRowsRef.current = new Map();
     setText(value);
     setPreviewRows(buildDraftRows(value));
     setDeletedIds(new Set());
@@ -281,6 +283,19 @@ export default function DashboardPage() {
     setResultRows(new Map());
     setPreviewError("");
     setKeyboardMessage("");
+  }
+
+  function appendInboundText(value: string) {
+    const nextValue = value.trim();
+    if (!nextValue) return;
+    const currentValue = inboundTextRef.current.trimEnd();
+    const mergedValue = currentValue ? `${currentValue}\n${nextValue}` : nextValue;
+    inboundTextRef.current = mergedValue;
+    resultRowsRef.current = new Map();
+    setText(mergedValue);
+    setPreviewRows(buildDraftRows(mergedValue));
+    setResultRows(new Map());
+    setPreviewError("");
   }
 
   const loadDashboard = useCallback(async () => {
@@ -313,7 +328,11 @@ export default function DashboardPage() {
         try {
           const value = JSON.parse(event.data) as unknown;
           if (!isClipboardMessage(value)) return;
-          replaceInboundText(value.text);
+          if (resultRowsRef.current.size > 0) {
+            replaceInboundText(value.text);
+          } else {
+            appendInboundText(value.text);
+          }
           setClipboardState(
             `已从剪贴板载入 ${value.validLines.length} 条，剔除 ${value.rejectedCount} 条`
           );
@@ -430,6 +449,7 @@ export default function DashboardPage() {
 
   function handleTextChange(value: string) {
     inboundTextRef.current = value;
+    resultRowsRef.current = new Map();
     setText(value);
     setPreviewRows(buildDraftRows(value));
     setDeletedIds(new Set());
@@ -463,7 +483,9 @@ export default function DashboardPage() {
         commitRows,
         Array.from(approvedPendingIds)
       );
-      setResultRows(new Map(payload.rows.map((row) => [row.clientId, row])));
+      const nextResultRows = new Map(payload.rows.map((row) => [row.clientId, row]));
+      resultRowsRef.current = nextResultRows;
+      setResultRows(nextResultRows);
       await loadDashboard();
       setFifoQuantity((current) => Math.max(1, current));
     } catch (error) {
