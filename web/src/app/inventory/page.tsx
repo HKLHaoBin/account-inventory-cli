@@ -1,10 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowUpDown,
   Copy,
-  Upload,
   CheckSquare,
   Square,
   PackageOpen,
@@ -15,8 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
-import { writeAppClipboardText } from "@/lib/api";
-import { mockInventory } from "@/lib/mock-data";
+import { fetchInventory, writeAppClipboardText } from "@/lib/api";
 import {
   cn,
   formatAccountLine,
@@ -35,11 +33,55 @@ export default function InventoryPage() {
   const [density, setDensity] = useState<"comfortable" | "compact">(
     "comfortable"
   );
+  const [records, setRecords] = useState<Account[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadInventory = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await fetchInventory();
+      setRecords(payload);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : "库存读取失败"
+      );
+      setRecords([]);
+      setSelected(new Set());
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    fetchInventory()
+      .then((payload) => {
+        if (!active) return;
+        setRecords(payload);
+      })
+      .catch((requestError) => {
+        if (!active) return;
+        setError(
+          requestError instanceof Error ? requestError.message : "库存读取失败"
+        );
+        setRecords([]);
+        setSelected(new Set());
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const sorted = useMemo(() => {
-    let items = [...mockInventory];
-    if (filter) {
-      const q = filter.toLowerCase();
+    let items = [...records];
+    const q = filter.trim().toLowerCase();
+    if (q) {
       items = items.filter(
         (a) =>
           a.username.toLowerCase().includes(q) ||
@@ -53,7 +95,12 @@ export default function InventoryPage() {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return items;
-  }, [filter, sortKey, sortDir]);
+  }, [filter, records, sortKey, sortDir]);
+
+  const visibleSelectedCount = useMemo(
+    () => sorted.filter((a) => selected.has(a.id)).length,
+    [selected, sorted]
+  );
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -74,11 +121,18 @@ export default function InventoryPage() {
   };
 
   const toggleAll = () => {
-    if (selected.size === sorted.length) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(sorted.map((a) => a.id)));
-    }
+    const visibleIds = new Set(sorted.map((a) => a.id));
+    setSelected((prev) => {
+      const allVisibleSelected =
+        visibleIds.size > 0 && [...visibleIds].every((id) => prev.has(id));
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        for (const id of visibleIds) next.delete(id);
+      } else {
+        for (const id of visibleIds) next.add(id);
+      }
+      return next;
+    });
   };
 
   const copyAccount = (a: Account) => {
@@ -95,7 +149,50 @@ export default function InventoryPage() {
 
   const rowPadding = density === "compact" ? "py-2" : "py-3.5";
 
-  if (mockInventory.length === 0) {
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">库存列表</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            正在加载库存...
+          </p>
+        </div>
+        <Card>
+          <CardContent className="py-8 text-sm text-muted-foreground">
+            正在加载库存...
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">库存列表</h1>
+          <p className="mt-1 text-sm text-red-600">库存读取失败：{error}</p>
+        </div>
+        <Card>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-6">
+            <p className="text-sm text-muted-foreground">
+              当前未展示任何预设数据。
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void loadInventory()}
+            >
+              重试
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (records.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
         <PackageOpen className="h-12 w-12 text-muted-foreground" />
@@ -113,7 +210,7 @@ export default function InventoryPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">库存列表</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            共 {mockInventory.length} 条 · 默认按 FIFO 入库时间排序
+            共 {records.length} 条 · 默认按 FIFO 入库时间排序
           </p>
         </div>
       </div>
@@ -143,15 +240,7 @@ export default function InventoryPage() {
         <Button
           variant="secondary"
           size="sm"
-          disabled={selected.size === 0}
-        >
-          <Upload className="h-4 w-4" />
-          出库选中 ({selected.size})
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={selected.size === 0}
+          disabled={visibleSelectedCount === 0}
           onClick={() => {
             const lines = sorted
               .filter((a) => selected.has(a.id))
@@ -169,7 +258,7 @@ export default function InventoryPage() {
           }}
         >
           <Copy className="h-4 w-4" />
-          复制选中
+          复制选中 ({visibleSelectedCount})
         </Button>
         <Button
           variant="ghost"
@@ -182,124 +271,142 @@ export default function InventoryPage() {
         </Button>
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/40">
-                  <th className="w-10 px-4 py-3">
-                    <button type="button" onClick={toggleAll}>
-                      {selected.size === sorted.length && sorted.length > 0 ? (
-                        <CheckSquare className="h-4 w-4 text-primary" />
-                      ) : (
-                        <Square className="h-4 w-4 text-muted-foreground" />
-                      )}
-                    </button>
-                  </th>
-                  <th className="px-4 py-3 text-left font-medium">账号</th>
-                  <th className="px-4 py-3 text-left font-medium">密码</th>
-                  <th className="px-4 py-3 text-left font-medium">邮箱</th>
-                  <th className="px-4 py-3 text-left font-medium">邮箱密码</th>
-                  <th className="px-4 py-3 text-left font-medium">网址</th>
-                  <th className="px-4 py-3 text-left font-medium">入库时间</th>
-                  <th className="px-4 py-3 text-left font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((account, index) => {
-                  const isFirst =
-                    sortKey === "inboundAt" &&
-                    sortDir === "asc" &&
-                    index === 0 &&
-                    !filter;
-                  return (
-                    <tr
-                      key={account.id}
-                      className={cn(
-                        "border-b border-border transition-colors hover:bg-muted/30",
-                        selected.has(account.id) && "bg-primary/5",
-                        isFirst && "bg-primary/[0.03]"
-                      )}
-                    >
-                      <td className={cn("px-4", rowPadding)}>
-                        <button
-                          type="button"
-                          onClick={() => toggleSelect(account.id)}
-                        >
-                          {selected.has(account.id) ? (
-                            <CheckSquare className="h-4 w-4 text-primary" />
-                          ) : (
-                            <Square className="h-4 w-4 text-muted-foreground" />
-                          )}
-                        </button>
-                      </td>
-                      <td className={cn("px-4 font-mono", rowPadding)}>
-                        <div className="flex items-center gap-2">
-                          {isFirst && (
-                            <Badge variant="fifo" className="text-[10px]">
-                              FIFO 队首
-                            </Badge>
-                          )}
+      {sorted.length === 0 ? (
+        <Card>
+          <CardContent className="py-8 text-sm text-muted-foreground">
+            没有匹配的库存记录
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-muted/40">
+                    <th className="w-10 px-4 py-3">
+                      <button type="button" onClick={toggleAll}>
+                        {visibleSelectedCount === sorted.length &&
+                        sorted.length > 0 ? (
+                          <CheckSquare className="h-4 w-4 text-primary" />
+                        ) : (
+                          <Square className="h-4 w-4 text-muted-foreground" />
+                        )}
+                      </button>
+                    </th>
+                    <th className="px-4 py-3 text-left font-medium">账号</th>
+                    <th className="px-4 py-3 text-left font-medium">密码</th>
+                    <th className="px-4 py-3 text-left font-medium">邮箱</th>
+                    <th className="px-4 py-3 text-left font-medium">邮箱密码</th>
+                    <th className="px-4 py-3 text-left font-medium">网址</th>
+                    <th className="px-4 py-3 text-left font-medium">入库时间</th>
+                    <th className="px-4 py-3 text-left font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map((account, index) => {
+                    const isFirst =
+                      sortKey === "inboundAt" &&
+                      sortDir === "asc" &&
+                      index === 0 &&
+                      !filter;
+                    return (
+                      <tr
+                        key={account.id}
+                        className={cn(
+                          "border-b border-border transition-colors hover:bg-muted/30",
+                          selected.has(account.id) && "bg-primary/5",
+                          isFirst && "bg-primary/[0.03]"
+                        )}
+                      >
+                        <td className={cn("px-4", rowPadding)}>
                           <button
                             type="button"
-                            className="hover:text-primary"
-                            onClick={() => copyAccount(account)}
+                            onClick={() => toggleSelect(account.id)}
                           >
-                            {account.username}
+                            {selected.has(account.id) ? (
+                              <CheckSquare className="h-4 w-4 text-primary" />
+                            ) : (
+                              <Square className="h-4 w-4 text-muted-foreground" />
+                            )}
                           </button>
-                        </div>
-                      </td>
-                      <td className={cn("px-4", rowPadding)}>
-                        <PasswordField value={account.password} />
-                      </td>
-                      <td className={cn("px-4", rowPadding)}>
-                        {account.email ? (
-                          <PasswordField value={account.email} />
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className={cn("px-4", rowPadding)}>
-                        {account.emailPassword ? (
-                          <PasswordField value={account.emailPassword} />
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className={cn("px-4 max-w-[140px] truncate", rowPadding)}>
-                        {account.url ? (
-                          <span className="text-xs text-blue-600">{account.url}</span>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className={cn("px-4 text-xs text-muted-foreground whitespace-nowrap", rowPadding)}>
-                        {formatDateTime(account.inboundAt)}
-                      </td>
-                      <td className={cn("px-4", rowPadding)}>
-                        <div className="flex gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => copyAccount(account)}
-                            aria-label="复制"
-                          >
-                            <Copy className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button variant="ghost" size="sm" className="text-xs">
-                            出库
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
+                        </td>
+                        <td className={cn("px-4 font-mono", rowPadding)}>
+                          <div className="flex items-center gap-2">
+                            {isFirst && (
+                              <Badge variant="fifo" className="text-[10px]">
+                                FIFO 队首
+                              </Badge>
+                            )}
+                            <button
+                              type="button"
+                              className="hover:text-primary"
+                              onClick={() => copyAccount(account)}
+                            >
+                              {account.username}
+                            </button>
+                          </div>
+                        </td>
+                        <td className={cn("px-4", rowPadding)}>
+                          <PasswordField value={account.password} />
+                        </td>
+                        <td className={cn("px-4", rowPadding)}>
+                          {account.email ? (
+                            <PasswordField value={account.email} />
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className={cn("px-4", rowPadding)}>
+                          {account.emailPassword ? (
+                            <PasswordField value={account.emailPassword} />
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td
+                          className={cn(
+                            "px-4 max-w-[140px] truncate",
+                            rowPadding
+                          )}
+                        >
+                          {account.url ? (
+                            <span className="text-xs text-blue-600">
+                              {account.url}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td
+                          className={cn(
+                            "px-4 text-xs text-muted-foreground whitespace-nowrap",
+                            rowPadding
+                          )}
+                        >
+                          {formatDateTime(account.inboundAt)}
+                        </td>
+                        <td className={cn("px-4", rowPadding)}>
+                          <div className="flex gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => copyAccount(account)}
+                              aria-label="复制"
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

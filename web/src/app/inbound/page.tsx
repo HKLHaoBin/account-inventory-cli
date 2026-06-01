@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/input";
 import { commitInbound, writeAppClipboardText } from "@/lib/api";
 import { parseAccountLine, parseLines } from "@/lib/parser";
+import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
 import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
 import { cn, formatDateTime, maskValue } from "@/lib/utils";
 import { SAMPLE_FORMAT } from "@/lib/mock-data";
@@ -140,6 +141,10 @@ export default function InboundPage() {
         try {
           const value = JSON.parse(event.data) as unknown;
           if (!isClipboardMessage(value)) return;
+          if (shouldIgnoreInboundClipboardText(value.text)) {
+            setClipboardState("已忽略本次出库复制内容");
+            return;
+          }
           if (resultRowsRef.current.size > 0) resetForText(value.text);
           else appendText(value.text);
           setClipboardState(

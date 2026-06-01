@@ -24,8 +24,9 @@ import {
   commitInbound,
   fetchDashboard,
   previewFifo,
-  writeAppClipboardText,
+  writeOutboundClipboardText,
 } from "@/lib/api";
+import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
 import { isClipboardMessage, getClipboardWsUrl } from "@/lib/ws";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { cn, formatDateTime, formatRelativeTime, maskValue } from "@/lib/utils";
@@ -328,6 +329,10 @@ export default function DashboardPage() {
         try {
           const value = JSON.parse(event.data) as unknown;
           if (!isClipboardMessage(value)) return;
+          if (shouldIgnoreInboundClipboardText(value.text)) {
+            setClipboardState("已忽略本次出库复制内容");
+            return;
+          }
           if (resultRowsRef.current.size > 0) {
             replaceInboundText(value.text);
           } else {
@@ -501,7 +506,7 @@ export default function DashboardPage() {
     try {
       const payload = await commitFifo(fifoQuantity);
       if (payload.clipboardText) {
-        await writeAppClipboardText(payload.clipboardText);
+        await writeOutboundClipboardText(payload.clipboardText);
       }
       setFifoMessage(`已出库 ${payload.quantity} 条并复制到剪贴板`);
       await loadDashboard();

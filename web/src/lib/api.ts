@@ -1,9 +1,11 @@
 import type {
+  Account,
   DashboardPayload,
   FifoCommitPayload,
   FifoPreviewPayload,
   InboundCommitPayload,
   InboundPreviewRow,
+  InventoryPayload,
   OutboundByUsernamePayload,
   OutboundHistoryPayload,
   OutboundRecord,
@@ -13,6 +15,10 @@ import type {
   SearchResult,
   UpdateStatusPayload,
 } from "@/types/account";
+import {
+  clearOutboundClipboardText,
+  rememberOutboundClipboardText,
+} from "@/lib/outbound-clipboard-guard";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -38,6 +44,11 @@ async function requestJson<T>(
 
 export function fetchDashboard(): Promise<DashboardPayload> {
   return requestJson<DashboardPayload>("/api/dashboard");
+}
+
+export async function fetchInventory(): Promise<Account[]> {
+  const payload = await requestJson<InventoryPayload>("/api/inventory");
+  return payload.records;
 }
 
 export async function previewInbound(
@@ -141,5 +152,15 @@ export async function writeAppClipboardText(text: string): Promise<void> {
     await ignoreClipboardText(text);
   } catch {
     // Clipboard copy already succeeded; ignoring the watcher is best-effort.
+  }
+}
+
+export async function writeOutboundClipboardText(text: string): Promise<void> {
+  rememberOutboundClipboardText(text);
+  try {
+    await writeAppClipboardText(text);
+  } catch (error) {
+    clearOutboundClipboardText();
+    throw error;
   }
 }

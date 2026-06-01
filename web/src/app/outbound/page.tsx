@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
 import { PasswordField } from "@/components/ui/password-field";
-import { writeAppClipboardText } from "@/lib/api";
+import { writeOutboundClipboardText } from "@/lib/api";
 import { mockInventory } from "@/lib/mock-data";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
 import Link from "next/link";
@@ -35,7 +35,7 @@ export default function OutboundPage() {
         )
       )
       .join("\n");
-    await writeAppClipboardText(text);
+    await writeOutboundClipboardText(text);
     setCopied(true);
     setResultOpen(true);
     setTimeout(() => setCopied(false), 2000);

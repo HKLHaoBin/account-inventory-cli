@@ -11,7 +11,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/input";
-import { commitOutboundPaste, writeAppClipboardText } from "@/lib/api";
+import {
+  commitOutboundPaste,
+  writeAppClipboardText,
+  writeOutboundClipboardText,
+} from "@/lib/api";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
 import { cn, maskValue } from "@/lib/utils";
@@ -189,7 +193,7 @@ export default function OutboundPastePage() {
       resultRowsRef.current = nextRows;
       setResultRows(nextRows);
       if (payload.clipboardText) {
-        await writeAppClipboardText(payload.clipboardText);
+        await writeOutboundClipboardText(payload.clipboardText);
       }
       setMessage(
         `出库完成：成功 ${payload.successCount} 条，失败 ${payload.errorCount} 条`

@@ -11,6 +11,7 @@ import {
   outboundByUsername,
   searchAccounts,
   writeAppClipboardText,
+  writeOutboundClipboardText,
 } from "@/lib/api";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
 import type { SearchResult } from "@/types/account";
@@ -110,7 +111,7 @@ function SearchContent() {
     try {
       const payload = await outboundByUsername(r.account.username);
       if (payload.clipboardText) {
-        await writeAppClipboardText(payload.clipboardText);
+        await writeOutboundClipboardText(payload.clipboardText);
       }
       await loadResults();
     } catch (requestError) {

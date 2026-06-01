@@ -5,7 +5,7 @@ import { Minus, Plus, Copy, Check } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { commitFifo, previewFifo, writeAppClipboardText } from "@/lib/api";
+import { commitFifo, previewFifo, writeOutboundClipboardText } from "@/lib/api";
 import type { Account } from "@/types/account";
 
 interface QuickOutboundModalProps {
@@ -54,7 +54,7 @@ export function QuickOutboundModal({
     try {
       const payload = await commitFifo(quantity);
       if (payload.clipboardText) {
-        await writeAppClipboardText(payload.clipboardText);
+        await writeOutboundClipboardText(payload.clipboardText);
       }
       setMax(Math.max(0, payload.max - payload.quantity));
       setPreview([]);

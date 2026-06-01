@@ -986,6 +986,58 @@ def test_api_search_inventory_and_history() -> None:
     assert like_results[0]["account"]["username"] == "100%api"
 
 
+def test_api_inventory_empty() -> None:
+    _reset_inventory()
+    client = _api_client()
+
+    response = client.get("/api/inventory")
+    assert response.status_code == 200
+    assert response.json()["records"] == []
+
+
+def test_api_inventory_real_records_ordered() -> None:
+    _reset_inventory()
+    db.insert_account(
+        "first_inventory",
+        "pw1",
+        email="first@mail.test",
+        email_password="mailpw1",
+        url="https://first.example",
+    )
+    db.insert_account("second_inventory", "pw2", email="second@mail.test")
+    db.insert_account("third_inventory", "pw3")
+
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE accounts SET created_at = ? WHERE username = ?",
+            ("2026-01-01 10:00:00", "first_inventory"),
+        )
+        conn.execute(
+            "UPDATE accounts SET created_at = ? WHERE username = ?",
+            ("2026-01-02 10:00:00", "second_inventory"),
+        )
+        conn.execute(
+            "UPDATE accounts SET created_at = ? WHERE username = ?",
+            ("2026-01-02 10:00:00", "third_inventory"),
+        )
+
+    client = _api_client()
+    response = client.get("/api/inventory")
+    assert response.status_code == 200
+    records = response.json()["records"]
+    assert [record["username"] for record in records] == [
+        "first_inventory",
+        "second_inventory",
+        "third_inventory",
+    ]
+    first = records[0]
+    assert first["password"] == "pw1"
+    assert first["email"] == "first@mail.test"
+    assert first["emailPassword"] == "mailpw1"
+    assert first["url"] == "https://first.example"
+    assert first["inboundAt"] == "2026-01-01 10:00:00"
+
+
 def test_api_outbound_history_empty() -> None:
     _reset_inventory()
     client = _api_client()
@@ -1371,6 +1423,8 @@ def run_all() -> tuple[int, list[str]]:
         ("api inbound commit", test_api_inbound_commit),
         ("api fifo preview and commit", test_api_fifo_preview_and_commit),
         ("api search inventory and history", test_api_search_inventory_and_history),
+        ("api inventory empty", test_api_inventory_empty),
+        ("api inventory ordered", test_api_inventory_real_records_ordered),
         ("api outbound history empty", test_api_outbound_history_empty),
         ("api outbound history ordered", test_api_outbound_history_real_records_ordered),
         ("api outbound by username", test_api_outbound_by_username),

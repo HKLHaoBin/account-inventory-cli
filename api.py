@@ -65,6 +65,10 @@ class OutboundHistoryPayload(BaseModel):
     records: list[OutboundRecordPayload]
 
 
+class InventoryPayload(BaseModel):
+    records: list[AccountPayload]
+
+
 class ActivityPayload(BaseModel):
     id: str
     type: Literal["inbound", "outbound"]
@@ -341,6 +345,13 @@ def get_dashboard() -> DashboardPayload:
             ActivityPayload(**activity)
             for activity in db.list_recent_activities(limit=10)
         ],
+    )
+
+
+@app.get("/api/inventory", response_model=InventoryPayload)
+def get_inventory() -> InventoryPayload:
+    return InventoryPayload(
+        records=[_account_payload(row) for row in db.list_inventory()]
     )
 
 

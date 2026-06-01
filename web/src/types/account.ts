@@ -88,6 +88,10 @@ export interface OutboundHistoryPayload {
   records: OutboundRecord[];
 }
 
+export interface InventoryPayload {
+  records: Account[];
+}
+
 export interface DashboardPayload {
   stats: {
     inventoryCount: number;

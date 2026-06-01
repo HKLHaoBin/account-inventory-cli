@@ -16,7 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   outboundByUsername,
   searchAccounts,
-  writeAppClipboardText,
+  writeOutboundClipboardText,
 } from "@/lib/api";
 import type { SearchResult } from "@/types/account";
 
@@ -119,7 +119,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     try {
       const payload = await outboundByUsername(hit.account.username);
       if (payload.clipboardText) {
-        await writeAppClipboardText(payload.clipboardText);
+        await writeOutboundClipboardText(payload.clipboardText);
       }
       setResults([]);
       setQuery("");
