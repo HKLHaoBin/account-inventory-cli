@@ -93,6 +93,18 @@ class UpdateApplyError(RuntimeError):
         self.new_backend_pid = int(new_backend_pid)
 
 
+class GitHubRateLimitError(RuntimeError):
+    def __init__(self, reset_epoch: int | None):
+        self.reset_epoch = reset_epoch
+        self.reset_at = (
+            datetime.fromtimestamp(reset_epoch).isoformat(timespec="seconds")
+            if reset_epoch
+            else ""
+        )
+        retry_hint = f"; retry after {self.reset_at}" if self.reset_at else ""
+        super().__init__(f"GitHub API rate limit exceeded{retry_hint}")
+
+
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -272,9 +284,36 @@ def github_latest_release(repo: str, timeout: int = 20) -> dict[str, Any]:
         "Accept": "application/vnd.github+json",
         "User-Agent": "account-inventory-updater",
     }
+    token = os.getenv("UPDATER_GITHUB_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     response = requests.get(url, headers=headers, timeout=timeout)
+    if response.status_code == 403 and is_github_rate_limited(response):
+        raise GitHubRateLimitError(github_rate_limit_reset_epoch(response))
     response.raise_for_status()
     return response.json()
+
+
+def is_github_rate_limited(response: requests.Response) -> bool:
+    remaining = response.headers.get("X-RateLimit-Remaining")
+    if remaining == "0":
+        return True
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    message = str(payload.get("message") or "").casefold()
+    return "rate limit" in message
+
+
+def github_rate_limit_reset_epoch(response: requests.Response) -> int | None:
+    raw = response.headers.get("X-RateLimit-Reset", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def find_asset_url(release: dict[str, Any], asset_name: str) -> Optional[str]:
@@ -885,6 +924,12 @@ def main() -> int:
                 last_state = "error"
                 last_message = f"update failed: {exc}"
                 last_extra = {"repo": str(args.repo)}
+                if isinstance(exc, GitHubRateLimitError):
+                    last_message = str(exc)
+                    if exc.reset_epoch:
+                        last_extra["github_rate_limit_reset"] = exc.reset_epoch
+                    if exc.reset_at:
+                        last_extra["github_rate_limit_reset_at"] = exc.reset_at
                 write_phase_status(work_dir, last_state, last_message, "failed", last_extra)
 
             if not args.watch:

@@ -84,6 +84,10 @@ export interface SearchPayload {
   results: SearchResult[];
 }
 
+export interface OutboundHistoryPayload {
+  records: OutboundRecord[];
+}
+
 export interface DashboardPayload {
   stats: {
     inventoryCount: number;

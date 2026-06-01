@@ -986,6 +986,62 @@ def test_api_search_inventory_and_history() -> None:
     assert like_results[0]["account"]["username"] == "100%api"
 
 
+def test_api_outbound_history_empty() -> None:
+    _reset_inventory()
+    client = _api_client()
+
+    response = client.get("/api/outbound/history")
+    assert response.status_code == 200
+    assert response.json()["records"] == []
+
+
+def test_api_outbound_history_real_records_ordered() -> None:
+    _reset_inventory()
+    db.insert_account(
+        "first_history",
+        "pw1",
+        email="first@mail.test",
+        email_password="mailpw1",
+        url="https://first.example",
+    )
+    db.insert_account("second_history", "pw2", email="second@mail.test")
+    db.insert_account("third_history", "pw3")
+    db.outbound_by_username("first_history")
+    db.outbound_by_username("second_history")
+    db.outbound_by_username("third_history")
+
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-01-01 10:00:00", "first_history"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-01-02 10:00:00", "second_history"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-01-02 10:00:00", "third_history"),
+        )
+
+    client = _api_client()
+    response = client.get("/api/outbound/history")
+    assert response.status_code == 200
+    records = response.json()["records"]
+    assert [record["username"] for record in records] == [
+        "third_history",
+        "second_history",
+        "first_history",
+    ]
+    first = records[2]
+    assert first["password"] == "pw1"
+    assert first["email"] == "first@mail.test"
+    assert first["emailPassword"] == "mailpw1"
+    assert first["url"] == "https://first.example"
+    assert first["inboundAt"]
+    assert first["outboundAt"] == "2026-01-01 10:00:00"
+
+
 def test_api_outbound_by_username() -> None:
     _reset_inventory()
     db.insert_account("target", "pw", email="target@mail.test")
@@ -1115,6 +1171,83 @@ def test_updater_release_assets() -> None:
     assert updater.find_asset_url(release, "missing.zip") is None
 
 
+def test_updater_github_token_header() -> None:
+    import updater
+
+    class DummyResponse:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"tag_name": "v0.2.0", "assets": []}
+
+    with mock.patch.dict("os.environ", {"UPDATER_GITHUB_TOKEN": "token-123"}), mock.patch(
+        "updater.requests.get",
+        return_value=DummyResponse(),
+    ) as get_mock:
+        release = updater.github_latest_release("owner/repo")
+
+    headers = get_mock.call_args.kwargs["headers"]
+    assert headers["Authorization"] == "Bearer token-123"
+    assert release["tag_name"] == "v0.2.0"
+
+
+def test_update_check_rate_limit_status() -> None:
+    import updater
+    import updater_runtime
+
+    reset_epoch = 1767225600
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "VERSION").write_text("0.1.0", encoding="utf-8")
+        with mock.patch.object(
+            updater,
+            "inspect_latest_release",
+            side_effect=updater.GitHubRateLimitError(reset_epoch),
+        ):
+            status = updater_runtime.check_latest_update(root)
+
+    assert status["state"] == "error"
+    assert status["phase"] == "failed"
+    assert "GitHub API rate limit exceeded" in status["message"]
+    assert status["github_rate_limit_reset"] == reset_epoch
+    assert status["github_rate_limit_reset_at"]
+
+
+def test_update_check_rate_limit_cooldown() -> None:
+    import time
+    import updater
+    import updater_runtime
+
+    reset_epoch = int(time.time()) + 3600
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "VERSION").write_text("0.1.0", encoding="utf-8")
+        updater.write_phase_status(
+            root,
+            "error",
+            "GitHub API rate limit exceeded",
+            "failed",
+            {
+                "repo": "owner/repo",
+                "local_version": "0.1.0",
+                "github_rate_limit_reset": reset_epoch,
+            },
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {"UPDATER_GITHUB_TOKEN": "", "GITHUB_TOKEN": ""},
+        ), mock.patch.object(updater, "inspect_latest_release") as inspect_mock:
+            status = updater_runtime.check_latest_update(root)
+
+    inspect_mock.assert_not_called()
+    assert status["state"] == "error"
+    assert status["github_rate_limit_reset"] == reset_epoch
+
+
 def test_updater_whitelist_blocks_data_and_source() -> None:
     import updater
 
@@ -1238,11 +1371,16 @@ def run_all() -> tuple[int, list[str]]:
         ("api inbound commit", test_api_inbound_commit),
         ("api fifo preview and commit", test_api_fifo_preview_and_commit),
         ("api search inventory and history", test_api_search_inventory_and_history),
+        ("api outbound history empty", test_api_outbound_history_empty),
+        ("api outbound history ordered", test_api_outbound_history_real_records_ordered),
         ("api outbound by username", test_api_outbound_by_username),
         ("api outbound paste commit", test_api_outbound_paste_commit),
         ("api clipboard ignore", test_api_clipboard_ignore),
         ("updater version compare", test_updater_version_compare),
         ("updater release assets", test_updater_release_assets),
+        ("updater github token header", test_updater_github_token_header),
+        ("update check rate limit status", test_update_check_rate_limit_status),
+        ("update check rate limit cooldown", test_update_check_rate_limit_cooldown),
         ("updater whitelist", test_updater_whitelist_blocks_data_and_source),
         ("update trigger token guard", test_update_trigger_token_guard),
         ("launch update once command", test_launch_update_once_command),

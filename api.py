@@ -61,6 +61,10 @@ class SearchPayload(BaseModel):
     results: list[SearchResultPayload]
 
 
+class OutboundHistoryPayload(BaseModel):
+    records: list[OutboundRecordPayload]
+
+
 class ActivityPayload(BaseModel):
     id: str
     type: Literal["inbound", "outbound"]
@@ -368,6 +372,13 @@ def search_accounts(q: str = "") -> SearchPayload:
         )
 
     return SearchPayload(results=results)
+
+
+@app.get("/api/outbound/history", response_model=OutboundHistoryPayload)
+def get_outbound_history() -> OutboundHistoryPayload:
+    return OutboundHistoryPayload(
+        records=[_outbound_record_payload(row) for row in db.list_outbound_history()]
+    )
 
 
 @app.get("/api/runtime/update-status")

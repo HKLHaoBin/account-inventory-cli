@@ -1,13 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
-import { writeAppClipboardText } from "@/lib/api";
-import { mockHistory } from "@/lib/mock-data";
+import { fetchOutboundHistory, writeAppClipboardText } from "@/lib/api";
+import type { OutboundRecord } from "@/types/account";
 import {
   formatAccountLine,
   formatDateTime,
@@ -16,20 +16,62 @@ import {
 
 export default function HistoryPage() {
   const [filter, setFilter] = useState("");
+  const [records, setRecords] = useState<OutboundRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadHistory = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await fetchOutboundHistory();
+      setRecords(payload);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : "出库历史读取失败"
+      );
+      setRecords([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    fetchOutboundHistory()
+      .then((payload) => {
+        if (!active) return;
+        setRecords(payload);
+      })
+      .catch((requestError) => {
+        if (!active) return;
+        setError(
+          requestError instanceof Error ? requestError.message : "出库历史读取失败"
+        );
+        setRecords([]);
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const filtered = useMemo(() => {
-    if (!filter) return mockHistory;
-    const q = filter.toLowerCase();
-    return mockHistory.filter(
+    const q = filter.trim().toLowerCase();
+    if (!q) return records;
+    return records.filter(
       (r) =>
         r.username.toLowerCase().includes(q) ||
         r.email?.toLowerCase().includes(q)
     );
-  }, [filter]);
+  }, [filter, records]);
 
   const groups = useMemo(() => groupByDate(filtered), [filtered]);
 
-  const copyRecord = (r: (typeof mockHistory)[0]) => {
+  const copyRecord = (r: OutboundRecord) => {
     void writeAppClipboardText(
       formatAccountLine(
         r.username,
@@ -47,7 +89,7 @@ export default function HistoryPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">出库历史</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            共 {mockHistory.length} 条出库记录
+            共 {records.length} 条出库记录
           </p>
         </div>
         <Input
@@ -57,6 +99,41 @@ export default function HistoryPage() {
           className="max-w-xs"
         />
       </div>
+
+      {loading && (
+        <Card>
+          <CardContent className="py-8 text-sm text-muted-foreground">
+            正在加载出库历史...
+          </CardContent>
+        </Card>
+      )}
+
+      {!loading && error && (
+        <Card>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-6">
+            <p className="text-sm text-red-600">出库历史读取失败：{error}</p>
+            <Button variant="outline" size="sm" onClick={() => void loadHistory()}>
+              重试
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {!loading && !error && records.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-sm text-muted-foreground">
+            暂无出库历史记录
+          </CardContent>
+        </Card>
+      )}
+
+      {!loading && !error && records.length > 0 && filtered.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-sm text-muted-foreground">
+            没有匹配的出库历史记录
+          </CardContent>
+        </Card>
+      )}
 
       {groups.map((group) => (
         <div key={group.label} className="space-y-3">
@@ -105,12 +182,10 @@ export default function HistoryPage() {
                             <Button
                               variant="ghost"
                               size="icon"
+                              title="复制"
                               onClick={() => copyRecord(record)}
                             >
                               <Copy className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button variant="ghost" size="sm" className="text-xs">
-                              重新入库
                             </Button>
                           </div>
                         </td>

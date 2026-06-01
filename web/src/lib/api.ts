@@ -5,6 +5,8 @@ import type {
   InboundCommitPayload,
   InboundPreviewRow,
   OutboundByUsernamePayload,
+  OutboundHistoryPayload,
+  OutboundRecord,
   OutboundPasteCommitPayload,
   OutboundPasteRow,
   SearchPayload,
@@ -80,6 +82,13 @@ export async function searchAccounts(query: string): Promise<SearchResult[]> {
     `/api/search?q=${encodeURIComponent(query)}`
   );
   return payload.results;
+}
+
+export async function fetchOutboundHistory(): Promise<OutboundRecord[]> {
+  const payload = await requestJson<OutboundHistoryPayload>(
+    "/api/outbound/history"
+  );
+  return payload.records;
 }
 
 export function outboundByUsername(

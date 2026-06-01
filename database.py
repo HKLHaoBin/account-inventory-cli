@@ -285,6 +285,30 @@ def list_recent_activities(limit: int = 10) -> list[dict[str, Any]]:
     ]
 
 
+def list_outbound_history(limit: int | None = None) -> list[dict[str, Any]]:
+    sql = """
+        SELECT id, username, password, email, email_password, url, inbound_at, outbound_at
+        FROM outbound_records
+        ORDER BY outbound_at DESC, id DESC
+    """
+    params: tuple[Any, ...] = ()
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (limit,)
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [
+        {
+            **_row_to_account_dict(row),
+            "inbound_at": row["inbound_at"],
+            "outbound_at": row["outbound_at"],
+        }
+        for row in rows
+    ]
+
+
 def fifo_preview_many(count: int) -> list[dict[str, Any]]:
     if count <= 0:
         return []
