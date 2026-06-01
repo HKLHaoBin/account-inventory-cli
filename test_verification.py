@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -1223,18 +1224,16 @@ def test_updater_release_assets() -> None:
     assert updater.find_asset_url(release, "missing.zip") is None
 
 
-def test_updater_github_token_header() -> None:
+def test_updater_ignores_github_token_env() -> None:
     import updater
 
     class DummyResponse:
         status_code = 200
         headers: dict[str, str] = {}
+        url = "https://github.com/owner/repo/releases/tag/v0.2.0"
 
         def raise_for_status(self) -> None:
             return None
-
-        def json(self) -> dict[str, object]:
-            return {"tag_name": "v0.2.0", "assets": []}
 
     with mock.patch.dict("os.environ", {"UPDATER_GITHUB_TOKEN": "token-123"}), mock.patch(
         "updater.requests.get",
@@ -1243,7 +1242,10 @@ def test_updater_github_token_header() -> None:
         release = updater.github_latest_release("owner/repo")
 
     headers = get_mock.call_args.kwargs["headers"]
-    assert headers["Authorization"] == "Bearer token-123"
+    url = get_mock.call_args.args[0]
+    assert url == "https://github.com/owner/repo/releases/latest"
+    assert "Authorization" not in headers
+    assert get_mock.call_args.kwargs["allow_redirects"] is True
     assert release["tag_name"] == "v0.2.0"
 
 
@@ -1286,34 +1288,10 @@ def test_updater_release_tag_parse_and_download_urls() -> None:
     )
 
 
-def test_update_check_rate_limit_status() -> None:
+def test_update_check_ignores_stale_rate_limit_status() -> None:
     import updater
     import updater_runtime
 
-    reset_epoch = 1767225600
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        (root / "VERSION").write_text("0.1.0", encoding="utf-8")
-        with mock.patch.object(
-            updater,
-            "inspect_latest_release",
-            side_effect=updater.GitHubRateLimitError(reset_epoch),
-        ):
-            status = updater_runtime.check_latest_update(root)
-
-    assert status["state"] == "error"
-    assert status["phase"] == "failed"
-    assert "GitHub API rate limit exceeded" in status["message"]
-    assert status["github_rate_limit_reset"] == reset_epoch
-    assert status["github_rate_limit_reset_at"]
-
-
-def test_update_check_rate_limit_cooldown() -> None:
-    import time
-    import updater
-    import updater_runtime
-
-    reset_epoch = int(time.time()) + 3600
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "VERSION").write_text("0.1.0", encoding="utf-8")
@@ -1325,21 +1303,29 @@ def test_update_check_rate_limit_cooldown() -> None:
             {
                 "repo": "owner/repo",
                 "local_version": "0.1.0",
-                "github_rate_limit_reset": reset_epoch,
+                "github_rate_limit_reset": int(time.time()) + 3600,
             },
         )
-        with mock.patch.dict(
-            "os.environ",
-            {"UPDATER_GITHUB_TOKEN": "", "GITHUB_TOKEN": ""},
-        ), mock.patch.object(updater, "inspect_latest_release") as inspect_mock:
+        with mock.patch.object(
+            updater,
+            "inspect_latest_release",
+            return_value={
+                "repo": "owner/repo",
+                "local_version": "0.1.0",
+                "update_available": True,
+                "assets_ready": True,
+                "latest_tag": "v0.2.0",
+            },
+        ) as inspect_mock, mock.patch.dict("os.environ", {"UPDATER_GITHUB_REPO": "owner/repo"}):
             status = updater_runtime.check_latest_update(root)
 
-    inspect_mock.assert_not_called()
-    assert status["state"] == "error"
-    assert status["github_rate_limit_reset"] == reset_epoch
+    inspect_mock.assert_called_once_with("owner/repo", "0.1.0")
+    assert status["state"] == "update_available"
+    assert status["phase"] == "completed"
+    assert status["latest_tag"] == "v0.2.0"
 
 
-def test_run_update_once_rate_limit_cooldown() -> None:
+def test_run_update_once_ignores_stale_rate_limit_status() -> None:
     import time
     import updater
 
@@ -1359,41 +1345,161 @@ def test_run_update_once_rate_limit_cooldown() -> None:
             },
         )
         ctx = updater.RuntimeContext(root, 8000, 0, "python", None, None, Path(sys.executable), "0.1.0")
-        with mock.patch.dict(
-            "os.environ",
-            {"UPDATER_GITHUB_TOKEN": "", "GITHUB_TOKEN": ""},
-        ), mock.patch.object(updater, "github_latest_release") as latest_mock:
+        with mock.patch.object(
+            updater,
+            "github_latest_release",
+            return_value={
+                "tag_name": "v0.1.0",
+                "assets": [
+                    {
+                        "name": updater.RELEASE_ZIP_NAME,
+                        "browser_download_url": "https://example.com/app.zip",
+                    },
+                    {
+                        "name": updater.RELEASE_SHA256_NAME,
+                        "browser_download_url": "https://example.com/app.zip.sha256",
+                    },
+                ],
+            },
+        ) as latest_mock:
             result = updater.run_update_once(ctx, "owner/repo")
 
-    latest_mock.assert_not_called()
-    assert result["state"] == "error"
-    assert result["extra"]["github_rate_limit_reset"] == reset_epoch
+    latest_mock.assert_called_once_with("owner/repo")
+    assert result["state"] == "idle"
+    assert result["message"] == "already up-to-date"
 
 
-def test_updater_watch_sleep_uses_rate_limit_reset() -> None:
+def test_updater_frozen_default_work_dir_is_exe_parent() -> None:
     import updater
 
-    with mock.patch.dict("os.environ", {"UPDATER_GITHUB_TOKEN": "", "GITHUB_TOKEN": ""}):
-        assert updater.next_watch_sleep_seconds(
-            60,
-            "error",
-            {"github_rate_limit_reset": 900},
-            now_epoch=100,
-        ) == 800
-        assert updater.next_watch_sleep_seconds(
-            3600,
-            "error",
-            {"github_rate_limit_reset": 900},
-            now_epoch=100,
-        ) == 3600
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = Path(tmp) / "install" / "updater.exe"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        with mock.patch.object(sys, "frozen", True, create=True), mock.patch.object(sys, "executable", str(exe)):
+            assert updater.default_work_dir() == exe.parent
 
-    with mock.patch.dict("os.environ", {"UPDATER_GITHUB_TOKEN": "token-123"}):
-        assert updater.next_watch_sleep_seconds(
-            60,
-            "error",
-            {"github_rate_limit_reset": 900},
-            now_epoch=100,
-        ) == 60
+
+def test_updater_rejects_pyinstaller_temp_work_dir() -> None:
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mei_dir = Path(tmp) / "_MEI123456"
+        mei_dir.mkdir()
+        try:
+            updater.validate_work_dir(mei_dir)
+        except RuntimeError as exc:
+            assert "_MEI123456" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError for PyInstaller temp directory")
+
+
+def test_updater_direct_sidecar_command_uses_install_work_dir() -> None:
+    import argparse
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work_dir = Path(tmp) / "install"
+        sidecar = work_dir / updater.SIDECAR_DIR_NAME / "updater-direct-1.exe"
+        args = argparse.Namespace(
+            watch=False,
+            restore_watch=True,
+            interval_hours=24.0,
+            work_dir="",
+            backend_pid=123,
+            port=8000,
+            backend_mode="exe",
+            backend_executable=str(work_dir / "account-inventory-web.exe"),
+            backend_script="",
+            python_executable="",
+            repo="owner/repo",
+        )
+        command = updater.build_direct_sidecar_command(args, work_dir, sidecar)
+
+    assert command[0] == str(sidecar)
+    assert "--work-dir" in command
+    assert command[command.index("--work-dir") + 1] == str(work_dir)
+    assert "--restore-watch" in command
+
+
+def test_download_to_retries_connection_error_and_cleans_part() -> None:
+    import updater
+
+    class DummyResponse:
+        status_code = 200
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int) -> list[bytes]:
+            return [b"ok"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        output = Path(tmp) / "asset.zip"
+        with mock.patch(
+            "updater.requests.get",
+            side_effect=[updater.requests.ConnectionError("reset"), DummyResponse()],
+        ) as get_mock, mock.patch("updater.time.sleep") as sleep_mock:
+            updater.download_to("https://example.com/asset.zip", output, work_dir=Path(tmp))
+
+        assert output.read_bytes() == b"ok"
+        assert not Path(f"{output}.part").exists()
+        assert get_mock.call_count == 2
+        sleep_mock.assert_called_once()
+
+
+def test_download_to_retries_503_but_not_404() -> None:
+    import requests
+    import updater
+
+    class DummyResponse:
+        def __init__(self, status_code: int, chunks: list[bytes] | None = None):
+            self.status_code = status_code
+            self.chunks = chunks or []
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                response = requests.Response()
+                response.status_code = self.status_code
+                raise requests.HTTPError(f"{self.status_code} error", response=response)
+
+        def iter_content(self, chunk_size: int) -> list[bytes]:
+            return self.chunks
+
+    with tempfile.TemporaryDirectory() as tmp:
+        output = Path(tmp) / "asset.zip"
+        with mock.patch(
+            "updater.requests.get",
+            side_effect=[DummyResponse(503), DummyResponse(200, [b"ok"])],
+        ) as get_mock, mock.patch("updater.time.sleep"):
+            updater.download_to("https://example.com/asset.zip", output, work_dir=Path(tmp))
+        assert output.read_bytes() == b"ok"
+        assert get_mock.call_count == 2
+
+    with tempfile.TemporaryDirectory() as tmp:
+        output = Path(tmp) / "missing.zip"
+        with mock.patch("updater.requests.get", return_value=DummyResponse(404)) as get_mock:
+            try:
+                updater.download_to("https://example.com/missing.zip", output, work_dir=Path(tmp))
+            except requests.HTTPError:
+                pass
+            else:
+                raise AssertionError("expected 404 HTTPError")
+        assert get_mock.call_count == 1
+        assert not output.exists()
+        assert not Path(f"{output}.part").exists()
 
 
 def test_updater_whitelist_blocks_data_and_source() -> None:
@@ -1456,6 +1562,57 @@ def test_launch_update_once_command() -> None:
     assert str(root) in command
     assert "--port" in command
     assert "8123" in command
+
+
+def test_app_browser_url_localhost() -> None:
+    import app as web_app
+
+    assert web_app._browser_url("127.0.0.1", 8000) == "http://127.0.0.1:8000/"
+    assert web_app._browser_url("localhost", 8000) == "http://localhost:8000/"
+
+
+def test_app_browser_url_wildcard_host() -> None:
+    import app as web_app
+
+    assert web_app._browser_url("0.0.0.0", 8000) == "http://127.0.0.1:8000/"
+    assert web_app._browser_url("::", 8000) == "http://127.0.0.1:8000/"
+    assert web_app._browser_url("", 8000) == "http://127.0.0.1:8000/"
+
+
+def test_app_browser_url_ipv6() -> None:
+    import app as web_app
+
+    assert web_app._browser_url("::1", 8000) == "http://[::1]:8000/"
+    assert web_app._browser_url("[::1]", 8000) == "http://[::1]:8000/"
+
+
+def test_app_open_browser_after_port_ready() -> None:
+    import app as web_app
+
+    with mock.patch.object(
+        web_app,
+        "_is_port_open",
+        side_effect=[False, True],
+    ) as port_open, mock.patch.object(web_app.webbrowser, "open", return_value=True) as open_mock:
+        thread = web_app.open_browser_after_start("127.0.0.1", 8000)
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert port_open.call_count == 2
+    open_mock.assert_called_once_with("http://127.0.0.1:8000/", new=2)
+
+
+def test_app_browser_open_failure_does_not_raise() -> None:
+    import app as web_app
+
+    with mock.patch.object(web_app, "_is_port_open", return_value=True), mock.patch.object(
+        web_app.webbrowser,
+        "open",
+        side_effect=RuntimeError("browser unavailable"),
+    ), mock.patch("builtins.print") as print_mock:
+        web_app._open_browser_when_ready("127.0.0.1", 8000, timeout_seconds=0.1, check_interval=0)
+
+    print_mock.assert_called_once()
 
 
 def run_all() -> tuple[int, list[str]]:
@@ -1528,16 +1685,24 @@ def run_all() -> tuple[int, list[str]]:
         ("api clipboard ignore", test_api_clipboard_ignore),
         ("updater version compare", test_updater_version_compare),
         ("updater release assets", test_updater_release_assets),
-        ("updater github token header", test_updater_github_token_header),
+        ("updater ignores github token env", test_updater_ignores_github_token_env),
         ("updater web latest without token", test_updater_web_latest_without_token),
         ("updater release tag parse and download urls", test_updater_release_tag_parse_and_download_urls),
-        ("update check rate limit status", test_update_check_rate_limit_status),
-        ("update check rate limit cooldown", test_update_check_rate_limit_cooldown),
-        ("run update once rate limit cooldown", test_run_update_once_rate_limit_cooldown),
-        ("updater watch sleep uses rate limit reset", test_updater_watch_sleep_uses_rate_limit_reset),
+        ("update check ignores stale rate limit status", test_update_check_ignores_stale_rate_limit_status),
+        ("run update once ignores stale rate limit status", test_run_update_once_ignores_stale_rate_limit_status),
+        ("updater frozen default work dir", test_updater_frozen_default_work_dir_is_exe_parent),
+        ("updater rejects pyinstaller temp work dir", test_updater_rejects_pyinstaller_temp_work_dir),
+        ("updater direct sidecar command", test_updater_direct_sidecar_command_uses_install_work_dir),
+        ("download retry connection error", test_download_to_retries_connection_error_and_cleans_part),
+        ("download retry http status", test_download_to_retries_503_but_not_404),
         ("updater whitelist", test_updater_whitelist_blocks_data_and_source),
         ("update trigger token guard", test_update_trigger_token_guard),
         ("launch update once command", test_launch_update_once_command),
+        ("app browser url localhost", test_app_browser_url_localhost),
+        ("app browser url wildcard host", test_app_browser_url_wildcard_host),
+        ("app browser url ipv6", test_app_browser_url_ipv6),
+        ("app open browser after port ready", test_app_open_browser_after_port_ready),
+        ("app browser open failure", test_app_browser_open_failure_does_not_raise),
     ]
     passed = 0
     for name, fn in tests:

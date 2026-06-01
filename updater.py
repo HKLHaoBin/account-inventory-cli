@@ -27,7 +27,6 @@ else:
     import fcntl
 
 GITHUB_REPO = os.getenv("UPDATER_GITHUB_REPO", "HKLHaoBin/account-inventory-cli")
-GITHUB_RELEASE_LATEST_API = "https://api.github.com/repos/{repo}/releases/latest"
 GITHUB_RELEASE_LATEST_WEB = "https://github.com/{repo}/releases/latest"
 GITHUB_RELEASE_DOWNLOAD_WEB = "https://github.com/{repo}/releases/download/{tag}/{asset}"
 RELEASE_ZIP_NAME = "account-inventory-web-windows.zip"
@@ -59,6 +58,9 @@ FORBIDDEN_PREFIXES = (
 )
 IO_RETRY_DELAY_MS = 500
 IO_RETRY_MAX_ATTEMPTS = 6
+DOWNLOAD_RETRY_MAX_ATTEMPTS = 5
+DOWNLOAD_RETRY_BASE_DELAY_SECONDS = 2.0
+DOWNLOAD_RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 T = TypeVar("T")
 
@@ -94,18 +96,6 @@ class UpdateApplyError(RuntimeError):
     def __init__(self, message: str, new_backend_pid: int = 0):
         super().__init__(message)
         self.new_backend_pid = int(new_backend_pid)
-
-
-class GitHubRateLimitError(RuntimeError):
-    def __init__(self, reset_epoch: int | None):
-        self.reset_epoch = reset_epoch
-        self.reset_at = (
-            datetime.fromtimestamp(reset_epoch).isoformat(timespec="seconds")
-            if reset_epoch
-            else ""
-        )
-        retry_hint = f"; retry after {self.reset_at}" if self.reset_at else ""
-        super().__init__(f"GitHub API rate limit exceeded{retry_hint}")
 
 
 def now_iso() -> str:
@@ -147,38 +137,6 @@ def read_app_version(work_dir: Path) -> str:
     except OSError:
         value = ""
     return value or "0.0.0-dev"
-
-
-def json_file(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def github_token() -> str:
-    return os.getenv("UPDATER_GITHUB_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
-
-
-def has_github_token() -> bool:
-    return bool(github_token())
-
-
-def active_github_rate_limit_cooldown(work_dir: Path, now_epoch: int | None = None) -> dict[str, Any] | None:
-    if has_github_token():
-        return None
-    payload = json_file(work_dir / STATUS_FILE_NAME)
-    try:
-        reset_epoch = int(payload.get("github_rate_limit_reset") or 0)
-    except (TypeError, ValueError):
-        reset_epoch = 0
-    now_value = int(time.time()) if now_epoch is None else int(now_epoch)
-    if payload.get("state") == "error" and reset_epoch > now_value:
-        return payload
-    return None
 
 
 def parse_version(value: str) -> Optional[tuple[int, int, int]]:
@@ -314,25 +272,7 @@ def retry_io(
 
 
 def github_latest_release(repo: str, timeout: int = 20) -> dict[str, Any]:
-    if has_github_token():
-        return github_latest_release_api(repo, timeout)
     return github_latest_release_web(repo, timeout)
-
-
-def github_latest_release_api(repo: str, timeout: int = 20) -> dict[str, Any]:
-    url = GITHUB_RELEASE_LATEST_API.format(repo=repo)
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "account-inventory-updater",
-    }
-    token = github_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    response = requests.get(url, headers=headers, timeout=timeout)
-    if response.status_code == 403 and is_github_rate_limited(response):
-        raise GitHubRateLimitError(github_rate_limit_reset_epoch(response))
-    response.raise_for_status()
-    return response.json()
 
 
 def github_latest_release_web(repo: str, timeout: int = 20) -> dict[str, Any]:
@@ -383,28 +323,6 @@ def github_release_from_tag(repo: str, tag: str, html_url: str = "") -> dict[str
     }
 
 
-def is_github_rate_limited(response: requests.Response) -> bool:
-    remaining = response.headers.get("X-RateLimit-Remaining")
-    if remaining == "0":
-        return True
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    message = str(payload.get("message") or "").casefold()
-    return "rate limit" in message
-
-
-def github_rate_limit_reset_epoch(response: requests.Response) -> int | None:
-    raw = response.headers.get("X-RateLimit-Reset", "").strip()
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
 def find_asset_url(release: dict[str, Any], asset_name: str) -> Optional[str]:
     for asset in release.get("assets") or []:
         if str(asset.get("name") or "") == asset_name:
@@ -439,14 +357,67 @@ def inspect_latest_release(repo: str, local_version: str) -> dict[str, Any]:
     }
 
 
-def download_to(url: str, output_path: Path, timeout: int = 60) -> None:
+def retry_delay_seconds(attempt: int) -> float:
+    return DOWNLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1))
+
+
+def is_retryable_download_error(exc: Exception) -> bool:
+    if isinstance(exc, requests.HTTPError):
+        response = getattr(exc, "response", None)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        return status_code in DOWNLOAD_RETRY_STATUS_CODES
+    return isinstance(
+        exc,
+        (
+            requests.ConnectionError,
+            requests.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.SSLError,
+        ),
+    )
+
+
+def download_to(
+    url: str,
+    output_path: Path,
+    timeout: int = 60,
+    work_dir: Path | None = None,
+    asset_name: str = "",
+    max_attempts: int = DOWNLOAD_RETRY_MAX_ATTEMPTS,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(url, stream=True, timeout=timeout) as response:
-        response.raise_for_status()
-        with output_path.open("wb") as fp:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    fp.write(chunk)
+    part_path = Path(f"{output_path}.part")
+    for attempt in range(1, max(1, int(max_attempts)) + 1):
+        part_path.unlink(missing_ok=True)
+        try:
+            with requests.get(url, stream=True, timeout=timeout, allow_redirects=True) as response:
+                response.raise_for_status()
+                with part_path.open("wb") as fp:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            fp.write(chunk)
+            part_path.replace(output_path)
+            if work_dir is not None and attempt > 1:
+                trace(work_dir, "download:ok", asset=asset_name or output_path.name, attempt=attempt)
+            return
+        except Exception as exc:
+            part_path.unlink(missing_ok=True)
+            retry = is_retryable_download_error(exc) and attempt < max(1, int(max_attempts))
+            delay = retry_delay_seconds(attempt) if retry else 0
+            if work_dir is not None:
+                trace(
+                    work_dir,
+                    "download:error",
+                    asset=asset_name or output_path.name,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    retry=retry,
+                    next_delay_seconds=delay,
+                    error=repr(exc),
+                )
+            if not retry:
+                raise
+            time.sleep(delay)
 
 
 def parse_sha256_file(path: Path) -> str:
@@ -776,13 +747,30 @@ def prepare_update(ctx: RuntimeContext, repo: str, latest_tag: str, zip_url: str
 
     trace(ctx.work_dir, "update:prepare", phase="downloading", zip_url=zip_url, sha_url=sha_url)
     write_phase_status(ctx.work_dir, "downloading", "downloading release assets", "downloading", {"repo": repo, "tag": latest_tag})
-    download_to(zip_url, zip_path)
-    download_to(sha_url, sha_path)
-
-    expected_sha = parse_sha256_file(sha_path)
-    actual_sha = file_sha256(zip_path)
-    if actual_sha != expected_sha:
-        raise RuntimeError("sha256 verification failed")
+    for attempt in range(1, DOWNLOAD_RETRY_MAX_ATTEMPTS + 1):
+        download_to(zip_url, zip_path, work_dir=ctx.work_dir, asset_name=RELEASE_ZIP_NAME)
+        download_to(sha_url, sha_path, work_dir=ctx.work_dir, asset_name=RELEASE_SHA256_NAME)
+        expected_sha = parse_sha256_file(sha_path)
+        actual_sha = file_sha256(zip_path)
+        if actual_sha == expected_sha:
+            break
+        zip_path.unlink(missing_ok=True)
+        sha_path.unlink(missing_ok=True)
+        retry = attempt < DOWNLOAD_RETRY_MAX_ATTEMPTS
+        delay = retry_delay_seconds(attempt) if retry else 0
+        trace(
+            ctx.work_dir,
+            "download:error",
+            asset="sha256",
+            attempt=attempt,
+            max_attempts=DOWNLOAD_RETRY_MAX_ATTEMPTS,
+            retry=retry,
+            next_delay_seconds=delay,
+            error="sha256 verification failed",
+        )
+        if not retry:
+            raise RuntimeError("sha256 verification failed")
+        time.sleep(delay)
 
     write_phase_status(ctx.work_dir, "extracting", "extracting update package", "extracting", {"repo": repo, "tag": latest_tag})
     with zipfile.ZipFile(zip_path) as archive:
@@ -880,44 +868,8 @@ def finalize_or_rollback(ctx: RuntimeContext, prepared: PreparedUpdate, apply_er
     return {"state": "rolled_back", "message": "update failed and rollback recovered old version", "extra": extra}
 
 
-def cooldown_result_from_status(ctx: RuntimeContext, status: dict[str, Any], repo: str, local_version: str) -> dict[str, Any]:
-    extra = {
-        key: value
-        for key, value in status.items()
-        if key not in {"timestamp", "state", "message", "phase"}
-    }
-    extra.setdefault("repo", repo)
-    extra.setdefault("local_version", local_version)
-    message = str(status.get("message") or "GitHub API rate limit exceeded")
-    write_phase_status(ctx.work_dir, "error", message, "failed", extra)
-    return {"state": "error", "message": message, "extra": extra}
-
-
-def next_watch_sleep_seconds(
-    interval_seconds: int,
-    state: str,
-    extra: dict[str, Any],
-    now_epoch: int | None = None,
-) -> int:
-    sleep_seconds = max(60, int(interval_seconds))
-    if state != "error" or has_github_token():
-        return sleep_seconds
-    try:
-        reset_epoch = int(extra.get("github_rate_limit_reset") or 0)
-    except (TypeError, ValueError):
-        reset_epoch = 0
-    now_value = int(time.time()) if now_epoch is None else int(now_epoch)
-    if reset_epoch > now_value:
-        sleep_seconds = max(sleep_seconds, reset_epoch - now_value)
-    return sleep_seconds
-
-
 def run_update_once(ctx: RuntimeContext, repo: str) -> dict[str, Any]:
     local_version = (ctx.app_version or "").strip() or read_app_version(ctx.work_dir)
-    cooldown = active_github_rate_limit_cooldown(ctx.work_dir)
-    if cooldown is not None:
-        return cooldown_result_from_status(ctx, cooldown, repo, local_version)
-
     write_phase_status(ctx.work_dir, "checking", "checking latest release", "checking", {"repo": repo, "local_version": local_version})
     release = github_latest_release(repo)
     summary = release_summary(release)
@@ -960,6 +912,76 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-executable", default="", help="path to python executable")
     parser.add_argument("--repo", default=GITHUB_REPO, help="github repository in owner/repo format")
     return parser
+
+
+def default_work_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def is_pyinstaller_temp_dir(path: Path) -> bool:
+    return path.name.startswith("_MEI")
+
+
+def validate_work_dir(work_dir: Path) -> None:
+    if is_pyinstaller_temp_dir(work_dir):
+        raise RuntimeError(f"refusing to update PyInstaller temp directory: {work_dir}")
+
+
+def should_handoff_to_direct_sidecar(args: argparse.Namespace, work_dir: Path) -> bool:
+    if args.work_dir:
+        return False
+    if not getattr(sys, "frozen", False):
+        return False
+    executable = Path(sys.executable).resolve()
+    if executable.name.lower() != UPDATER_EXE_NAME:
+        return False
+    if executable.parent != work_dir:
+        return False
+    return executable.parent.name != SIDECAR_DIR_NAME
+
+
+def build_direct_sidecar_command(args: argparse.Namespace, work_dir: Path, sidecar_exe: Path) -> list[str]:
+    command = [str(sidecar_exe)]
+    if args.watch:
+        command.append("--watch")
+    if args.restore_watch:
+        command.append("--restore-watch")
+    command.extend(
+        [
+            "--interval-hours",
+            str(args.interval_hours),
+            "--work-dir",
+            str(work_dir),
+            "--backend-pid",
+            str(int(args.backend_pid)),
+            "--port",
+            str(int(args.port)),
+            "--backend-mode",
+            str(args.backend_mode),
+            "--repo",
+            str(args.repo),
+        ]
+    )
+    if args.backend_executable:
+        command.extend(["--backend-executable", str(args.backend_executable)])
+    if args.backend_script:
+        command.extend(["--backend-script", str(args.backend_script)])
+    if args.python_executable:
+        command.extend(["--python-executable", str(args.python_executable)])
+    return command
+
+
+def handoff_to_direct_sidecar(args: argparse.Namespace, work_dir: Path) -> int:
+    sidecar_dir = work_dir / SIDECAR_DIR_NAME
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    sidecar_exe = sidecar_dir / f"updater-direct-{int(time.time())}.exe"
+    shutil.copy2(Path(sys.executable).resolve(), sidecar_exe)
+    command = build_direct_sidecar_command(args, work_dir, sidecar_exe)
+    trace(work_dir, "main:handoff", sidecar=str(sidecar_exe), work_dir=str(work_dir), command=command)
+    completed = subprocess.run(command, cwd=str(work_dir))
+    return int(completed.returncode)
 
 
 def copy_updater_exe_for_sidecar(work_dir: Path) -> Optional[Path]:
@@ -1017,7 +1039,11 @@ def maybe_restore_watch(ctx: RuntimeContext, repo: str, interval_hours: float) -
 
 def main() -> int:
     args = build_parser().parse_args()
-    work_dir = Path(args.work_dir).resolve() if args.work_dir else Path(__file__).resolve().parent
+    work_dir = Path(args.work_dir).resolve() if args.work_dir else default_work_dir()
+    validate_work_dir(work_dir)
+    if should_handoff_to_direct_sidecar(args, work_dir):
+        return handoff_to_direct_sidecar(args, work_dir)
+
     ctx = RuntimeContext(
         work_dir=work_dir,
         port=int(args.port),
@@ -1049,17 +1075,11 @@ def main() -> int:
                 last_state = "error"
                 last_message = f"update failed: {exc}"
                 last_extra = {"repo": str(args.repo)}
-                if isinstance(exc, GitHubRateLimitError):
-                    last_message = str(exc)
-                    if exc.reset_epoch:
-                        last_extra["github_rate_limit_reset"] = exc.reset_epoch
-                    if exc.reset_at:
-                        last_extra["github_rate_limit_reset_at"] = exc.reset_at
                 write_phase_status(work_dir, last_state, last_message, "failed", last_extra)
 
             if not args.watch:
                 break
-            sleep_seconds = next_watch_sleep_seconds(interval_seconds, last_state, last_extra)
+            sleep_seconds = interval_seconds
             write_phase_status(
                 work_dir,
                 last_state,

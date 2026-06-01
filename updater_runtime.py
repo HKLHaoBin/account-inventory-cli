@@ -272,23 +272,12 @@ def maybe_start_auto_update(root: Path = ROOT) -> None:
 def check_latest_update(root: Path = ROOT) -> dict[str, Any]:
     repo = os.getenv("UPDATER_GITHUB_REPO", updater.GITHUB_REPO)
     local_version = read_app_version(root)
-    current = read_update_status(root)
-    if updater.active_github_rate_limit_cooldown(root) is not None:
-        return current
 
     try:
         result = updater.inspect_latest_release(repo, local_version)
         state = "update_available" if result.get("update_available") else "idle"
         message = "new release found" if result.get("update_available") else "already up-to-date"
         updater.write_phase_status(root, state, message, "completed", result)
-        return read_update_status(root)
-    except updater.GitHubRateLimitError as exc:
-        extra: dict[str, Any] = {"repo": repo, "local_version": local_version}
-        if exc.reset_epoch:
-            extra["github_rate_limit_reset"] = exc.reset_epoch
-        if exc.reset_at:
-            extra["github_rate_limit_reset_at"] = exc.reset_at
-        updater.write_phase_status(root, "error", str(exc), "failed", extra)
         return read_update_status(root)
     except Exception as exc:
         updater.write_phase_status(root, "error", f"update check failed: {exc}", "failed", {"repo": repo})
