@@ -164,6 +164,69 @@ jobs:
           account-inventory-web.exe
           '@ | Set-Content -Path release-package\start-web.bat -Encoding ASCII
 
+      - name: Add release README
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $readme = @(
+            "# 账号出入库管理 Release $version"
+            ""
+            "## 推荐下载"
+            ""
+            "普通用户推荐下载："
+            "- account-inventory-web-windows.zip"
+            ""
+            "需要固定版本归档时下载："
+            "- account-inventory-web-$version-windows.zip"
+            ""
+            "不建议普通用户下载 Source code。源码包是 GitHub 自动生成的仓库源码快照，不包含已经编译好的 Windows EXE，也不包含构建好的前端静态产物。"
+            ""
+            "## Release 文件说明"
+            ""
+            "- account-inventory-web-$version-windows.zip"
+            "  - 带版本号的完整 Windows 发布包。"
+            "  - 内容包含 account-inventory-web.exe、updater.exe、web/out 前端静态产物、VERSION、start-web.bat 和本 README。"
+            "  - 适合需要保留指定版本的用户下载。"
+            ""
+            "- account-inventory-web-windows.zip"
+            "  - 稳定文件名的完整 Windows 发布包，内容与带版本号 zip 相同。"
+            "  - 适合普通用户下载，也供自动更新程序固定查找。"
+            ""
+            "- account-inventory-web-windows.zip.sha256"
+            "  - account-inventory-web-windows.zip 的 SHA256 校验文件。"
+            "  - 用于确认下载文件没有损坏或被替换。"
+            ""
+            "- Source code (zip)"
+            "  - GitHub 自动生成的源码压缩包。"
+            "  - 不包含可直接运行的 EXE 和 web/out 构建产物。"
+            ""
+            "- Source code (tar.gz)"
+            "  - GitHub 自动生成的源码压缩包，tar.gz 格式。"
+            "  - 不包含可直接运行的 EXE 和 web/out 构建产物。"
+            ""
+            "## 发布包内文件说明"
+            ""
+            "- account-inventory-web.exe"
+            "  - 主程序后端 EXE，启动后提供本地 Web 服务。"
+            ""
+            "- updater.exe"
+            "  - 自动更新辅助程序。"
+            ""
+            "- start-web.bat"
+            "  - Windows 双击启动脚本，会运行 account-inventory-web.exe。"
+            ""
+            "- web/out"
+            "  - 已构建完成的前端静态页面产物。"
+            ""
+            "- VERSION"
+            "  - 当前发布版本号。"
+            ""
+            "- README.txt"
+            "  - 本说明文件。"
+          )
+          $readme | Set-Content -Path release-package\README.txt -Encoding UTF8
+          Copy-Item release-package\README.txt README.txt -Force
+
       - name: Verify release package
         shell: bash
         run: |
@@ -172,6 +235,8 @@ jobs:
           test -f release-package/web/out/index.html
           test -f release-package/VERSION
           test -f release-package/start-web.bat
+          test -f release-package/README.txt
+          test -f README.txt
 
       - name: Compress release package
         shell: pwsh
@@ -195,6 +260,7 @@ jobs:
             account-inventory-web-${{ needs.version.outputs.version }}-windows.zip
             account-inventory-web-windows.zip
             account-inventory-web-windows.zip.sha256
+            README.txt
           generate_release_notes: true
           overwrite_files: true
           make_latest: true
