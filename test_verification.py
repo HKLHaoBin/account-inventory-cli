@@ -26,7 +26,7 @@ from batch import (
     classify_inbound_line,
     classify_outbound_line,
 )
-from parser import format_account, parse_account_line
+from parser import extract_valid_account_lines, format_account, parse_account_line
 
 
 def _use_temp_db() -> tempfile.TemporaryDirectory[str]:
@@ -336,6 +336,78 @@ def test_clipboard_copy_text() -> None:
         assert copy_mock.call_count == 5
 
 
+def test_clipboard_read_text() -> None:
+    import pyperclip
+
+    with mock.patch("pyperclip.paste", return_value="pasted"):
+        assert clipboard.read_text() == "pasted"
+
+    with mock.patch("pyperclip.paste") as paste_mock, mock.patch("clipboard.time.sleep"):
+        paste_mock.side_effect = [pyperclip.PyperclipException(), "ok"]
+        assert clipboard.read_text() == "ok"
+        assert paste_mock.call_count == 2
+
+    with mock.patch("pyperclip.paste") as paste_mock, mock.patch("clipboard.time.sleep"):
+        paste_mock.side_effect = pyperclip.PyperclipException()
+        assert clipboard.read_text() is None
+        assert paste_mock.call_count == 5
+
+
+def test_extract_valid_account_lines() -> None:
+    text = "\n".join(
+        [
+            "表头说明",
+            "",
+            "user----pass",
+            "bad-line",
+            "  u2----p2  ",
+            "----only",
+        ]
+    )
+    valid, rejected = extract_valid_account_lines(text)
+    assert valid == ["user----pass", "u2----p2"]
+    assert rejected == 4
+
+
+def test_read_batch_clipboard_import() -> None:
+    _reset_inventory()
+    cli._last_app_clipboard = None
+    clip_text = "header\n\nuser1----pass1\nbad\nuser2----pass2"
+    read_iter = iter(["", None])
+
+    def fake_read_with_idle(idle_tick=None, prompt=""):
+        if idle_tick is not None:
+            idle_tick()
+        return next(read_iter)
+
+    with mock.patch(
+        "console_input.read_line_or_exit_with_idle", side_effect=fake_read_with_idle
+    ), mock.patch("clipboard.read_text", return_value=clip_text):
+        lines = cli._read_batch_lines_or_exit("prompt")
+    assert lines == ["user1----pass1", "user2----pass2"]
+    cli._process_inbound_batch(lines)
+    assert db.count_inventory() == 2
+
+
+def test_ignore_app_clipboard() -> None:
+    cli._last_app_clipboard = None
+    _reset_inventory()
+    failure_text = "bad----line\ndup----p2"
+    cli._last_app_clipboard = failure_text
+    read_iter = iter(["", None])
+
+    def fake_read_with_idle(idle_tick=None, prompt=""):
+        if idle_tick is not None:
+            idle_tick()
+        return next(read_iter)
+
+    with mock.patch(
+        "console_input.read_line_or_exit_with_idle", side_effect=fake_read_with_idle
+    ), mock.patch("clipboard.read_text", return_value=failure_text):
+        lines = cli._read_batch_lines_or_exit("prompt")
+    assert lines == []
+
+
 def test_batch_inbound_pending_approve() -> None:
     _reset_inventory()
     db.insert_account("hist", "old")
@@ -562,7 +634,7 @@ def test_read_line_or_exit_unix_esc() -> None:
 def test_inbound_mode_stays_after_batch() -> None:
     _reset_inventory()
     side_effect = ["user1----pass1", "", "user2----pass2", "", None]
-    with mock.patch("console_input.read_line_or_exit", side_effect=side_effect):
+    with mock.patch("console_input.read_line_or_exit_with_idle", side_effect=side_effect):
         cli.handle_inbound()
     assert db.count_inventory() == 2
 
@@ -765,7 +837,7 @@ def test_outbound_paste_mode_stays_after_batch() -> None:
     _reset_inventory()
     db.insert_account("u1", "p1")
     side_effect = ["u1----p1", "", "direct----pw", "", None]
-    with mock.patch("console_input.read_line_or_exit", side_effect=side_effect), mock.patch(
+    with mock.patch("console_input.read_line_or_exit_with_idle", side_effect=side_effect), mock.patch(
         "cli.copy_to_clipboard", return_value=True
     ):
         cli.handle_outbound_paste()
@@ -776,9 +848,9 @@ def test_outbound_paste_mode_stays_after_batch() -> None:
 def test_handle_entry_outbound_paste() -> None:
     _reset_inventory()
     side_effect = ["2", "new----pw", "", None]
-    with mock.patch("console_input.read_line_or_exit", side_effect=side_effect), mock.patch(
-        "cli.copy_to_clipboard", return_value=True
-    ):
+    with mock.patch("console_input.read_line_or_exit", side_effect=["2", None]), mock.patch(
+        "console_input.read_line_or_exit_with_idle", side_effect=["new----pw", "", None]
+    ), mock.patch("cli.copy_to_clipboard", return_value=True):
         cli.handle_entry()
     assert db.exists_in_outbound("new")
 
@@ -810,6 +882,10 @@ def run_all() -> tuple[int, list[str]]:
         ("get_latest_outbound_times batch", test_get_latest_outbound_times_batch),
         ("exists many batch", test_exists_many_batch),
         ("clipboard copy_text", test_clipboard_copy_text),
+        ("clipboard read_text", test_clipboard_read_text),
+        ("extract_valid_account_lines", test_extract_valid_account_lines),
+        ("read batch clipboard import", test_read_batch_clipboard_import),
+        ("ignore app clipboard", test_ignore_app_clipboard),
         ("batch pending approve", test_batch_inbound_pending_approve),
         ("batch pending cancel", test_batch_inbound_pending_cancel),
         ("review keyboard approve", test_review_pending_keyboard_toggle_and_approve),

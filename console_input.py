@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import time
+from collections.abc import Callable
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -125,6 +127,49 @@ def read_line_or_exit(prompt: str = "") -> str | None:
         elif len(key) == 1 and key not in ("unknown",):
             chars.append(key)
             print(key, end="", flush=True)
+
+
+def read_line_or_exit_with_idle(
+    idle_tick: Callable[[], None] | None = None,
+    prompt: str = "",
+) -> str | None:
+    """Read one line with idle polling. Esc returns None; Ctrl+C raises KeyboardInterrupt."""
+    if not _IS_WINDOWS:
+        import select
+
+        if prompt:
+            print(prompt, end="", flush=True)
+        while True:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if ready:
+                return _read_line_unix("")
+            if idle_tick is not None:
+                idle_tick()
+
+    if prompt:
+        print(prompt, end="", flush=True)
+    chars: list[str] = []
+    while True:
+        if kbhit():
+            key = read_key()
+            if key == "esc":
+                print()
+                return None
+            if key == "enter":
+                print()
+                return "".join(chars).strip()
+            if key == "backspace":
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+            elif len(key) == 1 and key not in ("unknown",):
+                chars.append(key)
+                print(key, end="", flush=True)
+        else:
+            if idle_tick is not None:
+                idle_tick()
+            time.sleep(0.1)
 
 
 def read_key(timeout: float | None = None) -> str:

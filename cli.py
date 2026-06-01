@@ -14,7 +14,9 @@ from batch import (
     classify_inbound_line,
     classify_outbound_line,
 )
-from parser import format_account, parse_account_line
+from parser import extract_valid_account_lines, format_account, parse_account_line
+
+_last_app_clipboard: str | None = None
 
 
 def render_home(inventory: int) -> None:
@@ -35,6 +37,8 @@ def render_home(inventory: int) -> None:
 
 
 def copy_to_clipboard(text: str) -> bool:
+    global _last_app_clipboard
+    _last_app_clipboard = text
     return clipboard.copy_text(text)
 
 
@@ -53,8 +57,24 @@ def _read_batch_lines_or_exit(prompt: str) -> list[str] | None:
     print()
     print(prompt)
     lines: list[str] = []
+    last_seen_clipboard = ""
+
+    def idle_tick() -> None:
+        nonlocal last_seen_clipboard
+        text = clipboard.read_text()
+        if text is None or text == last_seen_clipboard or text == _last_app_clipboard:
+            return
+        valid, rejected = extract_valid_account_lines(text)
+        if not valid:
+            return
+        for account_line in valid:
+            print(account_line)
+        lines.extend(valid)
+        print(f"已从剪贴板导入 {len(valid)} 条，剔除 {rejected} 条")
+        last_seen_clipboard = text
+
     while True:
-        line = console_input.read_line_or_exit("")
+        line = console_input.read_line_or_exit_with_idle(idle_tick=idle_tick)
         if line is None:
             return None
         if not line:
@@ -441,7 +461,7 @@ def handle_inbound() -> None:
     _print_mode_header("入库录入")
     while True:
         lines = _read_batch_lines_or_exit(
-            "请输入账号信息（每行一条，输入空行结束）："
+            "请输入账号信息（每行一条，输入空行结束；可复制多行到剪贴板，合法行将自动回显）："
         )
         if lines is None:
             break
@@ -454,7 +474,7 @@ def handle_outbound_paste() -> None:
     _print_mode_header("出库录入")
     while True:
         lines = _read_batch_lines_or_exit(
-            "请输入出库账号信息（每行一条，输入空行结束）："
+            "请输入出库账号信息（每行一条，输入空行结束；可复制多行到剪贴板，合法行将自动回显）："
         )
         if lines is None:
             break

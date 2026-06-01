@@ -41,6 +41,24 @@ def parse_account_line(line: str) -> tuple[str, str, str | None, str | None, str
     return username, password, email, email_password, url
 
 
+def extract_valid_account_lines(text: str) -> tuple[list[str], int]:
+    """Return (valid_lines, rejected_count). One entry per kept line."""
+    valid: list[str] = []
+    rejected = 0
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            rejected += 1
+            continue
+        try:
+            parse_account_line(stripped)
+        except ValueError:
+            rejected += 1
+            continue
+        valid.append(stripped)
+    return valid, rejected
+
+
 def format_account(
     username: str,
     password: str,
