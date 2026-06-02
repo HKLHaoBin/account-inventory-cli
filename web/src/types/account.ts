@@ -8,8 +8,46 @@ export interface Account {
   inboundAt: string;
 }
 
-export interface OutboundRecord extends Account {
+export interface OutboundRecord {
+  id: string;
+  username: string;
+  password: string;
+  email?: string;
+  emailPassword?: string;
+  url?: string;
+  inboundAt: string | null;
+  inboundRecordId?: string | null;
   outboundAt: string;
+}
+
+export interface InboundRecord {
+  id: string;
+  username: string;
+  password: string;
+  email?: string;
+  emailPassword?: string;
+  url?: string;
+  inboundAt: string;
+}
+
+export type HistoryType = "inbound" | "outbound";
+
+export interface DateRangeFilter {
+  label: string;
+  value: string;
+}
+
+export interface HistoryRecord {
+  id: string;
+  type: HistoryType;
+  username: string;
+  password: string;
+  email?: string;
+  emailPassword?: string;
+  url?: string;
+  inboundAt: string | null;
+  outboundAt?: string;
+  timestamp: string;
 }
 
 export interface ParsedAccount {
@@ -73,12 +111,19 @@ export interface ActivityItem {
   timestamp: string;
 }
 
-export interface SearchResult {
-  id: string;
-  source: "inventory" | "history";
-  account: Account | OutboundRecord;
-  matchedField: string;
-}
+export type SearchResult =
+  | {
+      id: string;
+      source: "inventory";
+      account: Account;
+      matchedField: string;
+    }
+  | {
+      id: string;
+      source: "history";
+      account: OutboundRecord;
+      matchedField: string;
+    };
 
 export interface SearchPayload {
   results: SearchResult[];
@@ -86,6 +131,14 @@ export interface SearchPayload {
 
 export interface OutboundHistoryPayload {
   records: OutboundRecord[];
+}
+
+export interface InboundHistoryPayload {
+  records: InboundRecord[];
+}
+
+export interface HistoryPayload {
+  records: HistoryRecord[];
 }
 
 export interface InventoryPayload {

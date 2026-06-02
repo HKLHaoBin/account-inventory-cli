@@ -3,14 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { HistoryFilters } from "@/components/history/HistoryFilters";
 import { HistoryTable } from "@/components/history/HistoryTable";
-import { fetchUnifiedHistory } from "@/lib/api";
+import { fetchOutboundHistory } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
-import type { DateRangeFilter, HistoryRecord } from "@/types/account";
+import type { DateRangeFilter, OutboundRecord } from "@/types/account";
 
-export default function HistoryPage() {
+export default function OutboundHistoryPage() {
   const [query, setQuery] = useState("");
   const [ranges, setRanges] = useState<DateRangeFilter[]>([]);
-  const [records, setRecords] = useState<HistoryRecord[]>([]);
+  const [records, setRecords] = useState<OutboundRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
@@ -27,8 +27,7 @@ export default function HistoryPage() {
 
   useEffect(() => {
     let active = true;
-    fetchUnifiedHistory({
-      type: "all",
+    fetchOutboundHistory({
       q: query,
       ranges: rangeValues,
     })
@@ -40,7 +39,7 @@ export default function HistoryPage() {
       .catch((requestError) => {
         if (!active) return;
         setError(
-          requestError instanceof Error ? requestError.message : "历史流水读取失败"
+          requestError instanceof Error ? requestError.message : "出库历史读取失败"
         );
         setRecords([]);
       })
@@ -67,14 +66,14 @@ export default function HistoryPage() {
         onRangesChange={setRanges}
       />
 
-      <p className="text-sm text-muted-foreground">共 {records.length} 条记录</p>
+      <p className="text-sm text-muted-foreground">共 {records.length} 条出库记录</p>
 
       <HistoryTable
-        mode="all"
+        mode="outbound"
         records={records}
         loading={loading}
         error={error}
-        emptyMessage="暂无历史流水记录"
+        emptyMessage="暂无出库历史记录"
         onRetry={retry}
       />
     </div>

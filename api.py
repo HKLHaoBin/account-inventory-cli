@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
-from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -46,8 +46,47 @@ class AccountPayload(BaseModel):
     inboundAt: str
 
 
-class OutboundRecordPayload(AccountPayload):
+class OutboundRecordPayload(BaseModel):
+    id: str
+    username: str
+    password: str
+    email: str | None = None
+    emailPassword: str | None = None
+    url: str | None = None
+    inboundAt: str | None = None
+    inboundRecordId: str | None = None
     outboundAt: str
+
+
+class InboundRecordPayload(BaseModel):
+    id: str
+    username: str
+    password: str
+    email: str | None = None
+    emailPassword: str | None = None
+    url: str | None = None
+    inboundAt: str
+
+
+class HistoryRecordPayload(BaseModel):
+    id: str
+    type: Literal["inbound", "outbound"]
+    username: str
+    password: str
+    email: str | None = None
+    emailPassword: str | None = None
+    url: str | None = None
+    inboundAt: str | None = None
+    outboundAt: str | None = None
+    timestamp: str
+
+
+class InboundHistoryPayload(BaseModel):
+    records: list[InboundRecordPayload]
+
+
+class HistoryPayload(BaseModel):
+    records: list[HistoryRecordPayload]
 
 
 class SearchResultPayload(BaseModel):
@@ -230,7 +269,15 @@ def _account_payload(row: dict) -> AccountPayload:
     )
 
 
+def _outbound_inbound_fields(row: dict) -> tuple[str | None, str | None]:
+    inbound_record_id = row.get("inbound_record_id")
+    if inbound_record_id is None:
+        return None, None
+    return row["inbound_at"], str(inbound_record_id)
+
+
 def _outbound_record_payload(row: dict) -> OutboundRecordPayload:
+    inbound_at, inbound_record_id = _outbound_inbound_fields(row)
     return OutboundRecordPayload(
         id=str(row["id"]),
         username=row["username"],
@@ -238,8 +285,41 @@ def _outbound_record_payload(row: dict) -> OutboundRecordPayload:
         email=row["email"],
         emailPassword=row["email_password"],
         url=row["url"],
-        inboundAt=row["inbound_at"],
+        inboundAt=inbound_at,
+        inboundRecordId=inbound_record_id,
         outboundAt=row["outbound_at"],
+    )
+
+
+def _inbound_record_payload(row: dict) -> InboundRecordPayload:
+    return InboundRecordPayload(
+        id=str(row["id"]),
+        username=row["username"],
+        password=row["password"],
+        email=row["email"],
+        emailPassword=row["email_password"],
+        url=row["url"],
+        inboundAt=row["inbound_at"],
+    )
+
+
+def _history_record_payload(row: dict) -> HistoryRecordPayload:
+    record_type = row["type"]
+    if record_type == "outbound":
+        inbound_at, _ = _outbound_inbound_fields(row)
+    else:
+        inbound_at = row["inbound_at"]
+    return HistoryRecordPayload(
+        id=f"{record_type}-{row['id']}",
+        type=record_type,
+        username=row["username"],
+        password=row["password"],
+        email=row["email"],
+        emailPassword=row["email_password"],
+        url=row["url"],
+        inboundAt=inbound_at,
+        outboundAt=row.get("outbound_at"),
+        timestamp=row["timestamp"],
     )
 
 
@@ -488,9 +568,46 @@ def search_accounts(q: str = "") -> SearchPayload:
 
 
 @app.get("/api/outbound/history", response_model=OutboundHistoryPayload)
-def get_outbound_history() -> OutboundHistoryPayload:
+def get_outbound_history(
+    q: str = "",
+    ranges: list[str] = Query(default=[]),
+) -> OutboundHistoryPayload:
     return OutboundHistoryPayload(
-        records=[_outbound_record_payload(row) for row in db.list_outbound_history()]
+        records=[
+            _outbound_record_payload(row)
+            for row in db.list_outbound_history(query=q.strip(), range_tokens=ranges)
+        ]
+    )
+
+
+@app.get("/api/inbound/history", response_model=InboundHistoryPayload)
+def get_inbound_history(
+    q: str = "",
+    ranges: list[str] = Query(default=[]),
+) -> InboundHistoryPayload:
+    return InboundHistoryPayload(
+        records=[
+            _inbound_record_payload(row)
+            for row in db.list_inbound_history(query=q.strip(), range_tokens=ranges)
+        ]
+    )
+
+
+@app.get("/api/history", response_model=HistoryPayload)
+def get_history(
+    type: Literal["all", "inbound", "outbound"] = "all",
+    q: str = "",
+    ranges: list[str] = Query(default=[]),
+) -> HistoryPayload:
+    return HistoryPayload(
+        records=[
+            _history_record_payload(row)
+            for row in db.list_unified_history(
+                history_type=type,
+                query=q.strip(),
+                range_tokens=ranges,
+            )
+        ]
     )
 
 

@@ -11,6 +11,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from history_filters import (
+    DateRange,
+    build_date_or_clause,
+    parse_ranges,
+    q_to_date_range,
+)
+
 
 def _app_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -161,6 +168,113 @@ def _migrate_add_url_column(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN url TEXT")
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _migrate_inbound_history(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inbound_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            email TEXT,
+            email_password TEXT,
+            url TEXT,
+            inbound_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+        """
+    )
+
+    if not _column_exists(conn, "accounts", "inbound_record_id"):
+        conn.execute("ALTER TABLE accounts ADD COLUMN inbound_record_id INTEGER")
+    if not _column_exists(conn, "outbound_records", "inbound_record_id"):
+        conn.execute("ALTER TABLE outbound_records ADD COLUMN inbound_record_id INTEGER")
+
+    if not _table_exists(conn, "accounts"):
+        return
+
+    account_rows = conn.execute(
+        """
+        SELECT id, username, password, email, email_password, url, created_at
+        FROM accounts
+        WHERE inbound_record_id IS NULL
+        """
+    ).fetchall()
+    for row in account_rows:
+        cursor = conn.execute(
+            """
+            INSERT INTO inbound_records (
+                username, password, email, email_password, url, inbound_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["username"],
+                row["password"],
+                row["email"],
+                row["email_password"],
+                row["url"],
+                row["created_at"],
+            ),
+        )
+        conn.execute(
+            "UPDATE accounts SET inbound_record_id = ? WHERE id = ?",
+            (cursor.lastrowid, row["id"]),
+        )
+
+    outbound_rows = conn.execute(
+        """
+        SELECT id, username, password, email, email_password, url,
+               inbound_at, outbound_at, inbound_record_id
+        FROM outbound_records
+        WHERE inbound_record_id IS NULL
+          AND inbound_at != outbound_at
+        """
+    ).fetchall()
+    for row in outbound_rows:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM inbound_records
+            WHERE username = ?
+              AND inbound_at = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (row["username"], row["inbound_at"]),
+        ).fetchone()
+        if existing is not None:
+            inbound_record_id = existing["id"]
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO inbound_records (
+                    username, password, email, email_password, url, inbound_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["username"],
+                    row["password"],
+                    row["email"],
+                    row["email_password"],
+                    row["url"],
+                    row["inbound_at"],
+                ),
+            )
+            inbound_record_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE outbound_records SET inbound_record_id = ? WHERE id = ?",
+            (inbound_record_id, row["id"]),
+        )
+
+
 def _escape_like(substring: str) -> str:
     return substring.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -191,6 +305,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _migrate_add_url_column(conn)
+    _migrate_inbound_history(conn)
 
 
 def _init_database_file(record: dict[str, Any]) -> None:
@@ -233,8 +348,8 @@ def _counts_for_record(record: dict[str, Any]) -> dict[str, int]:
         inbound = conn.execute(
             """
             SELECT COUNT(*) AS n
-            FROM accounts
-            WHERE date(created_at) = date('now', 'localtime')
+            FROM inbound_records
+            WHERE date(inbound_at) = date('now', 'localtime')
             """
         ).fetchone()
         outbound = conn.execute(
@@ -381,8 +496,8 @@ def count_today_inbound() -> int:
         row = conn.execute(
             """
             SELECT COUNT(*) AS n
-            FROM accounts
-            WHERE date(created_at) = date('now', 'localtime')
+            FROM inbound_records
+            WHERE date(inbound_at) = date('now', 'localtime')
             """
         ).fetchone()
         return int(row["n"])
@@ -479,12 +594,36 @@ def insert_account(
 ) -> None:
     with _connect() as conn:
         try:
+            now = conn.execute(
+                "SELECT datetime('now', 'localtime') AS now"
+            ).fetchone()["now"]
+            cursor = conn.execute(
+                """
+                INSERT INTO inbound_records (
+                    username, password, email, email_password, url, inbound_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (username, password, email, email_password, url, now),
+            )
+            inbound_record_id = cursor.lastrowid
             conn.execute(
                 """
-                INSERT INTO accounts (username, password, email, email_password, url)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO accounts (
+                    username, password, email, email_password, url,
+                    created_at, inbound_record_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (username, password, email, email_password, url),
+                (
+                    username,
+                    password,
+                    email,
+                    email_password,
+                    url,
+                    now,
+                    inbound_record_id,
+                ),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"账号 {username} 已在库存中") from exc
@@ -558,8 +697,8 @@ def list_recent_activities(limit: int = 10) -> list[dict[str, Any]]:
             """
             SELECT type, id, username, timestamp
             FROM (
-                SELECT 'inbound' AS type, id, username, created_at AS timestamp
-                FROM accounts
+                SELECT 'inbound' AS type, id, username, inbound_at AS timestamp
+                FROM inbound_records
                 UNION ALL
                 SELECT 'outbound' AS type, id, username, outbound_at AS timestamp
                 FROM outbound_records
@@ -581,16 +720,145 @@ def list_recent_activities(limit: int = 10) -> list[dict[str, Any]]:
     ]
 
 
-def list_outbound_history(limit: int | None = None) -> list[dict[str, Any]]:
-    sql = """
-        SELECT id, username, password, email, email_password, url, inbound_at, outbound_at
-        FROM outbound_records
-        ORDER BY outbound_at DESC, id DESC
+def _row_to_inbound_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "password": row["password"],
+        "email": row["email"],
+        "email_password": row["email_password"],
+        "url": row["url"],
+        "inbound_at": row["inbound_at"],
+    }
+
+
+def _history_text_clause(
+    query: str,
+    *,
+    include_url: bool = True,
+) -> tuple[str, list[str]]:
+    if not query:
+        return "", []
+
+    pattern = f"%{_escape_like(query)}%"
+    if include_url:
+        return (
+            """
+            (
+                username LIKE ? ESCAPE '\\'
+                OR password LIKE ? ESCAPE '\\'
+                OR email LIKE ? ESCAPE '\\'
+                OR email_password LIKE ? ESCAPE '\\'
+                OR url LIKE ? ESCAPE '\\'
+            )
+            """,
+            [pattern, pattern, pattern, pattern, pattern],
+        )
+    return (
+        """
+        (
+            username LIKE ? ESCAPE '\\'
+            OR password LIKE ? ESCAPE '\\'
+            OR email LIKE ? ESCAPE '\\'
+            OR email_password LIKE ? ESCAPE '\\'
+        )
+        """,
+        [pattern, pattern, pattern, pattern],
+    )
+
+
+def _collect_history_ranges(
+    query: str,
+    range_tokens: list[str] | None,
+) -> tuple[list[DateRange], str]:
+    text_query = query.strip()
+    parsed_query = q_to_date_range(text_query)
+    if parsed_query is not None:
+        text_query = ""
+
+    ranges = parse_ranges(range_tokens or [])
+    if parsed_query is not None:
+        existing = {(item.start, item.end) for item in ranges}
+        key = (parsed_query.start, parsed_query.end)
+        if key not in existing:
+            ranges.append(parsed_query)
+    return ranges, text_query
+
+
+def _build_history_where(
+    *,
+    query: str,
+    range_tokens: list[str] | None,
+    timestamp_column: str,
+    include_url: bool = True,
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    ranges, text_query = _collect_history_ranges(query, range_tokens)
+
+    text_clause, text_params = _history_text_clause(text_query, include_url=include_url)
+    if text_clause:
+        clauses.append(text_clause)
+        params.extend(text_params)
+
+    date_clause, date_params = build_date_or_clause(timestamp_column, ranges)
+    if date_clause:
+        clauses.append(date_clause)
+        params.extend(date_params)
+
+    if not clauses:
+        return "", []
+    return f"WHERE {' AND '.join(clauses)}", params
+
+
+def list_inbound_history(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    where_sql, params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="inbound_at",
+    )
+    sql = f"""
+        SELECT id, username, password, email, email_password, url, inbound_at
+        FROM inbound_records
+        {where_sql}
+        ORDER BY inbound_at DESC, id DESC
     """
-    params: tuple[Any, ...] = ()
     if limit is not None:
         sql += " LIMIT ?"
-        params = (limit,)
+        params = [*params, limit]
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_row_to_inbound_dict(row) for row in rows]
+
+
+def list_outbound_history(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    where_sql, params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="outbound_at",
+    )
+    sql = f"""
+        SELECT id, username, password, email, email_password, url,
+               inbound_at, outbound_at, inbound_record_id
+        FROM outbound_records
+        {where_sql}
+        ORDER BY outbound_at DESC, id DESC
+    """
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = [*params, limit]
 
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
@@ -600,10 +868,66 @@ def list_outbound_history(limit: int | None = None) -> list[dict[str, Any]]:
             **_row_to_account_dict(row),
             "inbound_at": row["inbound_at"],
             "outbound_at": row["outbound_at"],
+            "inbound_record_id": row["inbound_record_id"],
         }
         for row in rows
     ]
 
+
+def list_unified_history(
+    *,
+    history_type: str = "all",
+    query: str = "",
+    range_tokens: list[str] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    normalized = history_type.strip().lower()
+    if normalized == "inbound":
+        return [
+            {**row, "type": "inbound", "timestamp": row["inbound_at"]}
+            for row in list_inbound_history(
+                query=query,
+                range_tokens=range_tokens,
+                limit=limit,
+            )
+        ]
+    if normalized == "outbound":
+        return [
+            {
+                **row,
+                "type": "outbound",
+                "timestamp": row["outbound_at"],
+            }
+            for row in list_outbound_history(
+                query=query,
+                range_tokens=range_tokens,
+                limit=limit,
+            )
+        ]
+
+    inbound_rows = list_inbound_history(query=query, range_tokens=range_tokens)
+    outbound_rows = list_outbound_history(query=query, range_tokens=range_tokens)
+    merged: list[dict[str, Any]] = []
+    for row in inbound_rows:
+        merged.append(
+            {
+                **row,
+                "type": "inbound",
+                "timestamp": row["inbound_at"],
+            }
+        )
+    for row in outbound_rows:
+        merged.append(
+            {
+                **row,
+                "type": "outbound",
+                "timestamp": row["outbound_at"],
+            }
+        )
+    merged.sort(key=lambda item: (item["timestamp"], item["id"]), reverse=True)
+    if limit is not None:
+        return merged[:limit]
+    return merged
 
 def fifo_preview_many(count: int) -> list[dict[str, Any]]:
     if count <= 0:
@@ -633,7 +957,7 @@ def search_outbound_history(substring: str) -> list[dict[str, Any]]:
         substring,
         columns=(
             "id, username, password, email, email_password, url, "
-            "inbound_at, outbound_at"
+            "inbound_at, outbound_at, inbound_record_id"
         ),
         order_by="outbound_at DESC, id DESC",
     )
@@ -654,7 +978,8 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, username, password, email, email_password, url, created_at
+            SELECT id, username, password, email, email_password, url,
+                   created_at, inbound_record_id
             FROM accounts
             ORDER BY created_at ASC, id ASC
             LIMIT ?
@@ -669,9 +994,10 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
             conn.execute(
                 """
                 INSERT INTO outbound_records (
-                    username, password, email, email_password, url, inbound_at
+                    username, password, email, email_password, url,
+                    inbound_at, inbound_record_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["username"],
@@ -680,6 +1006,7 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
                     row["email_password"],
                     row["url"],
                     row["created_at"],
+                    row["inbound_record_id"],
                 ),
             )
             records.append(
@@ -711,7 +1038,8 @@ def outbound_by_username(username: str) -> dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute(
             """
-            SELECT id, username, password, email, email_password, url, created_at
+            SELECT id, username, password, email, email_password, url,
+                   created_at, inbound_record_id
             FROM accounts
             WHERE username = ?
             """,
@@ -723,9 +1051,10 @@ def outbound_by_username(username: str) -> dict[str, Any] | None:
         conn.execute(
             """
             INSERT INTO outbound_records (
-                username, password, email, email_password, url, inbound_at
+                username, password, email, email_password, url,
+                inbound_at, inbound_record_id
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["username"],
@@ -734,6 +1063,7 @@ def outbound_by_username(username: str) -> dict[str, Any] | None:
                 row["email_password"],
                 row["url"],
                 row["created_at"],
+                row["inbound_record_id"],
             ),
         )
         conn.execute("DELETE FROM accounts WHERE id = ?", (row["id"],))
@@ -758,7 +1088,8 @@ def commit_outbound_paste_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
     with _connect() as conn:
         inventory_rows = conn.execute(
             f"""
-            SELECT id, username, password, email, email_password, url, created_at
+            SELECT id, username, password, email, email_password, url,
+                   created_at, inbound_record_id
             FROM accounts
             WHERE username IN ({placeholders})
             """,
@@ -786,9 +1117,10 @@ def commit_outbound_paste_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
                 conn.execute(
                     """
                     INSERT INTO outbound_records (
-                        username, password, email, email_password, url, inbound_at
+                        username, password, email, email_password, url,
+                        inbound_at, inbound_record_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         inventory_row["username"],
@@ -797,6 +1129,7 @@ def commit_outbound_paste_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
                         inventory_row["email_password"],
                         inventory_row["url"],
                         inventory_row["created_at"],
+                        inventory_row["inbound_record_id"],
                     ),
                 )
                 outbound_account_ids.append(inventory_row["id"])
@@ -881,14 +1214,15 @@ def insert_outbound_record(
     url: str | None = None,
 ) -> None:
     with _connect() as conn:
+        now = conn.execute("SELECT datetime('now', 'localtime') AS now").fetchone()["now"]
         conn.execute(
             """
             INSERT INTO outbound_records (
                 username, password, email, email_password, url, inbound_at
             )
-            VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (username, password, email, email_password, url),
+            (username, password, email, email_password, url, now),
         )
 
 
@@ -896,4 +1230,11 @@ def count_outbound_records() -> int:
     """Helper for tests."""
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM outbound_records").fetchone()
+        return int(row["n"])
+
+
+def count_inbound_records() -> int:
+    """Helper for tests."""
+    with _connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM inbound_records").fetchone()
         return int(row["n"])

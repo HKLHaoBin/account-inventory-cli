@@ -796,6 +796,20 @@ export default function DashboardPage() {
               <p className="text-xs text-primary">{keyboardMessage}</p>
             )}
 
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
+              <Button
+                className="w-full sm:w-auto"
+                onClick={handleInboundCommit}
+                disabled={inboundBusy || commitRows.length === 0}
+              >
+                <Check className="h-4 w-4" />
+                确认入库 ({approvedReadyCount})
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                未批准的曾出库条目会在提交后标记为取消
+              </span>
+            </div>
+
             <div className="hidden overflow-x-auto rounded-xl border border-border lg:block">
               <table className="w-full text-sm">
                 <thead>
@@ -991,20 +1005,6 @@ export default function DashboardPage() {
                   );
                 })
               )}
-            </div>
-
-            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
-              <Button
-                className="w-full sm:w-auto"
-                onClick={handleInboundCommit}
-                disabled={inboundBusy || commitRows.length === 0}
-              >
-                <Check className="h-4 w-4" />
-                确认入库 ({approvedReadyCount})
-              </Button>
-              <span className="text-xs text-muted-foreground">
-                未批准的曾出库条目会在提交后标记为取消
-              </span>
             </div>
           </CardContent>
         </Card>

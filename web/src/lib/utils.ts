@@ -53,8 +53,9 @@ export function formatRelativeTime(iso: string): string {
   return `${days} 天前`;
 }
 
-export function groupByDate<T extends { outboundAt: string }>(
-  records: T[]
+export function groupByDate<T>(
+  records: T[],
+  dateKey: keyof T
 ): { label: string; items: T[] }[] {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -68,7 +69,9 @@ export function groupByDate<T extends { outboundAt: string }>(
   };
 
   for (const record of records) {
-    const d = new Date(record.outboundAt);
+    const raw = record[dateKey];
+    if (typeof raw !== "string") continue;
+    const d = new Date(raw);
     d.setHours(0, 0, 0, 0);
     if (d.getTime() === today.getTime()) groups["今天"].push(record);
     else if (d.getTime() === yesterday.getTime()) groups["昨天"].push(record);

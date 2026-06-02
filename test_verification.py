@@ -44,6 +44,7 @@ def _reset_inventory() -> None:
     with db._connect() as conn:
         conn.execute("DELETE FROM accounts")
         conn.execute("DELETE FROM outbound_records")
+        conn.execute("DELETE FROM inbound_records")
 
 
 def test_scenario_1_initial_inventory_zero() -> None:
@@ -1118,6 +1119,297 @@ def test_api_inventory_real_records_ordered() -> None:
     assert first["inboundAt"] == "2026-01-01 10:00:00"
 
 
+def test_inbound_record_created_on_insert() -> None:
+    _reset_inventory()
+    db.insert_account("inbound_user", "pw1", email="in@mail.test")
+    assert db.count_inbound_records() == 1
+    assert db.count_inventory() == 1
+
+
+def test_inbound_history_persists_after_outbound() -> None:
+    _reset_inventory()
+    db.insert_account("persist_user", "pw")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("persist_user",),
+        ).fetchone()["inbound_record_id"]
+    db.outbound_by_username("persist_user")
+    assert not db.exists_in_inventory("persist_user")
+    assert db.count_inbound_records() == 1
+    inbound_rows = db.list_inbound_history()
+    assert len(inbound_rows) == 1
+    assert inbound_rows[0]["username"] == "persist_user"
+    assert inbound_rows[0]["id"] == inbound_id
+
+
+def test_reinbound_creates_new_inbound_record() -> None:
+    _reset_inventory()
+    db.insert_account("rein_user", "pw1")
+    with db._connect() as conn:
+        first_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("rein_user",),
+        ).fetchone()["inbound_record_id"]
+    db.outbound_by_username("rein_user")
+    db.insert_account("rein_user", "pw2")
+    with db._connect() as conn:
+        second_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("rein_user",),
+        ).fetchone()["inbound_record_id"]
+    assert first_id != second_id
+    assert db.count_inbound_records() == 2
+
+
+def test_migrate_inbound_history_backfill() -> None:
+    _reset_inventory()
+    with db._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (username, password, email, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("legacy_stock", "pw", "legacy@mail.test", "2026-01-10 09:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO outbound_records (
+                username, password, inbound_at, outbound_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            ("legacy_out", "pw2", "2026-01-05 08:00:00", "2026-01-06 10:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO outbound_records (
+                username, password, inbound_at, outbound_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            ("direct_out", "pw3", "2026-01-07 12:00:00", "2026-01-07 12:00:00"),
+        )
+
+    with db._connect() as conn:
+        db._migrate_inbound_history(conn)
+
+    with db._connect() as conn:
+        stock = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("legacy_stock",),
+        ).fetchone()
+        inventory_out = conn.execute(
+            """
+            SELECT inbound_record_id
+            FROM outbound_records
+            WHERE username = ?
+            """,
+            ("legacy_out",),
+        ).fetchone()
+        direct_out = conn.execute(
+            """
+            SELECT inbound_record_id
+            FROM outbound_records
+            WHERE username = ?
+            """,
+            ("direct_out",),
+        ).fetchone()
+
+    assert stock["inbound_record_id"] is not None
+    assert inventory_out["inbound_record_id"] is not None
+    assert direct_out["inbound_record_id"] is None
+    assert db.count_inbound_records() == 2
+
+
+def test_outbound_paths_set_inbound_record_id() -> None:
+    _reset_inventory()
+    db.insert_account("fifo_user", "pw1")
+    db.insert_account("byname_user", "pw2")
+    db.insert_account("paste_user", "pw3", email="paste@mail.test")
+
+    fifo = db.outbound_oldest_many(1)[0]
+    assert fifo["username"] == "fifo_user"
+    with db._connect() as conn:
+        fifo_out = conn.execute(
+            """
+            SELECT inbound_record_id
+            FROM outbound_records
+            WHERE username = ?
+            """,
+            ("fifo_user",),
+        ).fetchone()
+        assert fifo_out["inbound_record_id"] is not None
+
+    db.outbound_by_username("byname_user")
+    with db._connect() as conn:
+        byname_out = conn.execute(
+            """
+            SELECT inbound_record_id
+            FROM outbound_records
+            WHERE username = ?
+            """,
+            ("byname_user",),
+        ).fetchone()
+        assert byname_out["inbound_record_id"] is not None
+
+    db.commit_outbound_paste_rows(
+        [
+            {
+                "client_id": "line-1",
+                "line": "paste_user----x",
+                "username": "paste_user",
+                "password": "x",
+                "email": None,
+                "email_password": None,
+                "url": None,
+            },
+            {
+                "client_id": "line-2",
+                "line": "direct_user----direct_pw",
+                "username": "direct_user",
+                "password": "direct_pw",
+                "email": None,
+                "email_password": None,
+                "url": None,
+            },
+        ]
+    )
+    with db._connect() as conn:
+        paste_out = conn.execute(
+            """
+            SELECT inbound_record_id
+            FROM outbound_records
+            WHERE username = ?
+            """,
+            ("paste_user",),
+        ).fetchone()
+        direct_out = conn.execute(
+            """
+            SELECT inbound_record_id
+            FROM outbound_records
+            WHERE username = ?
+            """,
+            ("direct_user",),
+        ).fetchone()
+    assert paste_out["inbound_record_id"] is not None
+    assert direct_out["inbound_record_id"] is None
+
+
+def test_history_filters_parse_dates() -> None:
+    import history_filters as hf
+
+    assert hf.parse_date_token("2026-06-02") == hf.date(2026, 6, 2)
+    assert hf.parse_date_token("2026 6 2") == hf.date(2026, 6, 2)
+    assert hf.parse_date_token("2026/6/2") == hf.date(2026, 6, 2)
+    assert hf.parse_date_token("2026-6-2") == hf.date(2026, 6, 2)
+
+    single = hf.parse_range_token("2026-06-02")
+    assert single is not None
+    assert single.start == hf.date(2026, 6, 2)
+    assert single.end == hf.date(2026, 6, 2)
+
+    span = hf.parse_range_token("2026-06-01..2026-06-03")
+    assert span is not None
+    assert span.start == hf.date(2026, 6, 1)
+    assert span.end == hf.date(2026, 6, 3)
+
+
+def test_list_inbound_history_date_filters() -> None:
+    _reset_inventory()
+    db.insert_account("day_a", "pw")
+    db.insert_account("day_b", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-01 10:00:00", "day_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-03 10:00:00", "day_b"),
+        )
+
+    single = db.list_inbound_history(range_tokens=["2026-06-01"])
+    assert [row["username"] for row in single] == ["day_a"]
+
+    span = db.list_inbound_history(range_tokens=["2026-06-01..2026-06-02"])
+    assert [row["username"] for row in span] == ["day_a"]
+
+    text_date = db.list_inbound_history(query="2026 6 3")
+    assert [row["username"] for row in text_date] == ["day_b"]
+
+
+def test_list_unified_history_types() -> None:
+    _reset_inventory()
+    db.insert_account("unified_in", "pw")
+    db.outbound_by_username("unified_in")
+    db.insert_account("unified_still", "pw2")
+
+    all_rows = db.list_unified_history(history_type="all")
+    assert len(all_rows) == 3
+    assert {row["type"] for row in all_rows} == {"inbound", "outbound"}
+
+    inbound_rows = db.list_unified_history(history_type="inbound")
+    assert len(inbound_rows) == 2
+    assert all(row["type"] == "inbound" for row in inbound_rows)
+
+    outbound_rows = db.list_unified_history(history_type="outbound")
+    assert len(outbound_rows) == 1
+    assert outbound_rows[0]["type"] == "outbound"
+
+
+def test_api_history_endpoints_and_filters() -> None:
+    _reset_inventory()
+    db.insert_account("hist_in", "pw", email="hist@mail.test")
+    db.outbound_by_username("hist_in")
+    db.insert_account("hist_still", "pw2")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-01 10:00:00", "hist_in"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-02 10:00:00", "hist_still"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-01 11:00:00", "hist_in"),
+        )
+
+    client = _api_client()
+
+    inbound_response = client.get("/api/inbound/history")
+    assert inbound_response.status_code == 200
+    assert len(inbound_response.json()["records"]) == 2
+
+    outbound_response = client.get("/api/outbound/history")
+    assert outbound_response.status_code == 200
+    assert len(outbound_response.json()["records"]) == 1
+
+    all_response = client.get("/api/history", params={"type": "all"})
+    assert all_response.status_code == 200
+    assert len(all_response.json()["records"]) == 3
+
+    inbound_only = client.get("/api/history", params={"type": "inbound"})
+    assert len(inbound_only.json()["records"]) == 2
+
+    outbound_only = client.get("/api/history", params={"type": "outbound"})
+    assert len(outbound_only.json()["records"]) == 1
+
+    date_filter = client.get(
+        "/api/inbound/history",
+        params={"ranges": ["2026-06-01"]},
+    )
+    assert [row["username"] for row in date_filter.json()["records"]] == ["hist_in"]
+
+    text_date = client.get("/api/inbound/history", params={"q": "2026 6 2"})
+    assert [row["username"] for row in text_date.json()["records"]] == ["hist_still"]
+
+    search_q = client.get("/api/history", params={"q": "hist@mail.test"})
+    assert len(search_q.json()["records"]) == 2
+
+
 def test_api_outbound_history_empty() -> None:
     _reset_inventory()
     client = _api_client()
@@ -1172,6 +1464,55 @@ def test_api_outbound_history_real_records_ordered() -> None:
     assert first["url"] == "https://first.example"
     assert first["inboundAt"]
     assert first["outboundAt"] == "2026-01-01 10:00:00"
+
+
+def test_api_direct_outbound_null_inbound_at() -> None:
+    _reset_inventory()
+    db.insert_outbound_record("direct_api", "pw")
+    client = _api_client()
+
+    response = client.get("/api/outbound/history")
+    assert response.status_code == 200
+    record = next(
+        row for row in response.json()["records"] if row["username"] == "direct_api"
+    )
+    assert record["inboundAt"] is None
+    assert record["inboundRecordId"] is None
+
+
+def test_api_inventory_outbound_has_inbound_at() -> None:
+    _reset_inventory()
+    db.insert_account("inv_out", "pw", email="inv@mail.test")
+    db.outbound_by_username("inv_out")
+    client = _api_client()
+
+    response = client.get("/api/outbound/history")
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["username"] == "inv_out"
+    assert record["inboundAt"]
+    assert record["inboundRecordId"]
+
+
+def test_api_unified_history_direct_outbound_date_filter() -> None:
+    _reset_inventory()
+    db.insert_outbound_record("direct_filter", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-05 14:00:00", "direct_filter"),
+        )
+    client = _api_client()
+
+    filtered = client.get(
+        "/api/history",
+        params={"type": "outbound", "ranges": ["2026-06-05"]},
+    )
+    assert filtered.status_code == 200
+    records = filtered.json()["records"]
+    assert [row["username"] for row in records] == ["direct_filter"]
+    assert records[0]["inboundAt"] is None
+    assert records[0]["outboundAt"] == "2026-06-05 14:00:00"
 
 
 def test_api_outbound_by_username() -> None:
@@ -1997,8 +2338,23 @@ def run_all() -> tuple[int, list[str]]:
         ("api search inventory and history", test_api_search_inventory_and_history),
         ("api inventory empty", test_api_inventory_empty),
         ("api inventory ordered", test_api_inventory_real_records_ordered),
+        ("inbound record created", test_inbound_record_created_on_insert),
+        ("inbound persists after outbound", test_inbound_history_persists_after_outbound),
+        ("reinbound new record", test_reinbound_creates_new_inbound_record),
+        ("migrate inbound history", test_migrate_inbound_history_backfill),
+        ("outbound inbound_record_id paths", test_outbound_paths_set_inbound_record_id),
+        ("history filters parse dates", test_history_filters_parse_dates),
+        ("list inbound history filters", test_list_inbound_history_date_filters),
+        ("list unified history types", test_list_unified_history_types),
+        ("api history endpoints filters", test_api_history_endpoints_and_filters),
         ("api outbound history empty", test_api_outbound_history_empty),
         ("api outbound history ordered", test_api_outbound_history_real_records_ordered),
+        ("api direct outbound null inbound", test_api_direct_outbound_null_inbound_at),
+        ("api inventory outbound inbound", test_api_inventory_outbound_has_inbound_at),
+        (
+            "api unified direct outbound filter",
+            test_api_unified_history_direct_outbound_date_filter,
+        ),
         ("api outbound by username", test_api_outbound_by_username),
         ("api outbound paste commit", test_api_outbound_paste_commit),
         ("api clipboard ignore", test_api_clipboard_ignore),

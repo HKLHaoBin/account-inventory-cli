@@ -8,7 +8,7 @@ export const NAV_ITEMS = [
   { href: "/inbound", label: "入库", icon: "Download" },
   { href: "/outbound", label: "FIFO出库", icon: "Upload" },
   { href: "/outbound-paste", label: "出库粘贴", icon: "ClipboardPaste" },
-  { href: "/history", label: "出库历史", icon: "History" },
+  { href: "/history", label: "历史流水", icon: "History" },
   { href: "/settings", label: "设置", icon: "Settings" },
 ] as const;
 

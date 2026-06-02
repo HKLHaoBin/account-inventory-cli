@@ -5,8 +5,12 @@ import type {
   DashboardPayload,
   FifoCommitPayload,
   FifoPreviewPayload,
+  HistoryPayload,
+  HistoryRecord,
   InboundCommitPayload,
+  InboundHistoryPayload,
   InboundPreviewRow,
+  InboundRecord,
   InventoryPayload,
   OutboundByUsernamePayload,
   OutboundHistoryPayload,
@@ -146,9 +150,56 @@ export async function searchAccounts(query: string): Promise<SearchResult[]> {
   return payload.results;
 }
 
-export async function fetchOutboundHistory(): Promise<OutboundRecord[]> {
+function buildHistoryQuery(
+  params: {
+    q?: string;
+    ranges?: string[];
+    type?: "all" | "inbound" | "outbound";
+  } = {}
+): string {
+  const search = new URLSearchParams();
+  if (params.type && params.type !== "all") {
+    search.set("type", params.type);
+  }
+  if (params.q?.trim()) {
+    search.set("q", params.q.trim());
+  }
+  for (const range of params.ranges ?? []) {
+    if (range.trim()) {
+      search.append("ranges", range.trim());
+    }
+  }
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
+export async function fetchOutboundHistory(options?: {
+  q?: string;
+  ranges?: string[];
+}): Promise<OutboundRecord[]> {
   const payload = await requestJson<OutboundHistoryPayload>(
-    "/api/outbound/history"
+    `/api/outbound/history${buildHistoryQuery(options)}`
+  );
+  return payload.records;
+}
+
+export async function fetchInboundHistory(options?: {
+  q?: string;
+  ranges?: string[];
+}): Promise<InboundRecord[]> {
+  const payload = await requestJson<InboundHistoryPayload>(
+    `/api/inbound/history${buildHistoryQuery(options)}`
+  );
+  return payload.records;
+}
+
+export async function fetchUnifiedHistory(options?: {
+  type?: "all" | "inbound" | "outbound";
+  q?: string;
+  ranges?: string[];
+}): Promise<HistoryRecord[]> {
+  const payload = await requestJson<HistoryPayload>(
+    `/api/history${buildHistoryQuery(options)}`
   );
   return payload.records;
 }

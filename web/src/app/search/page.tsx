@@ -213,7 +213,7 @@ function SearchContent() {
                           出库：{formatDateTime(r.account.outboundAt)}
                         </p>
                       )}
-                      {"inboundAt" in r.account && r.source === "inventory" && (
+                      {r.source === "inventory" && (
                         <p className="text-xs text-muted-foreground">
                           入库：{formatDateTime(r.account.inboundAt)}
                         </p>
