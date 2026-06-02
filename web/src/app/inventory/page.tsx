@@ -287,7 +287,7 @@ export default function InventoryPage() {
       ) : (
         <Card>
           <CardContent className="p-0">
-            <div className="overflow-x-auto">
+            <div className="hidden overflow-x-auto md:block">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-muted/40">
@@ -388,7 +388,7 @@ export default function InventoryPage() {
                         </td>
                         <td
                           className={cn(
-                            "px-4 max-w-[160px] truncate text-xs text-muted-foreground",
+                            "px-4 break-words whitespace-pre-wrap text-xs text-muted-foreground",
                             rowPadding
                           )}
                         >
@@ -419,6 +419,93 @@ export default function InventoryPage() {
                   })}
                 </tbody>
               </table>
+            </div>
+
+            <div className="space-y-2 p-3 md:hidden">
+              <div className="flex items-center gap-2 border-b border-border pb-2">
+                <button type="button" onClick={toggleAll}>
+                  {visibleSelectedCount === sorted.length && sorted.length > 0 ? (
+                    <CheckSquare className="h-4 w-4 text-primary" />
+                  ) : (
+                    <Square className="h-4 w-4 text-muted-foreground" />
+                  )}
+                </button>
+                <span className="text-xs text-muted-foreground">
+                  全选 ({visibleSelectedCount}/{sorted.length})
+                </span>
+              </div>
+              {sorted.map((account, index) => {
+                const isFirst =
+                  sortKey === "inboundAt" &&
+                  sortDir === "asc" &&
+                  index === 0 &&
+                  !filter;
+                return (
+                  <div
+                    key={`${account.id}-mobile`}
+                    className={cn(
+                      "rounded-xl border border-border p-3",
+                      selected.has(account.id) && "bg-primary/5",
+                      isFirst && "bg-primary/[0.03]"
+                    )}
+                  >
+                    <div className="flex items-start gap-3">
+                      <button
+                        type="button"
+                        className="pt-0.5"
+                        onClick={() => toggleSelect(account.id)}
+                      >
+                        {selected.has(account.id) ? (
+                          <CheckSquare className="h-5 w-5 text-primary" />
+                        ) : (
+                          <Square className="h-5 w-5 text-muted-foreground" />
+                        )}
+                      </button>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {isFirst && (
+                            <Badge variant="fifo" className="text-[10px]">
+                              FIFO 队首
+                            </Badge>
+                          )}
+                          <span className="font-mono text-sm font-medium">
+                            {account.username}
+                          </span>
+                        </div>
+                        <PasswordField value={account.password} />
+                        {account.email && (
+                          <PasswordField value={account.email} />
+                        )}
+                        {account.emailPassword && (
+                          <PasswordField value={account.emailPassword} />
+                        )}
+                        {account.url && (
+                          <p className="break-all text-xs text-blue-600">
+                            {account.url}
+                          </p>
+                        )}
+                        {account.note?.trim() && (
+                          <p className="break-words whitespace-pre-wrap text-xs text-muted-foreground">
+                            备注：{account.note}
+                          </p>
+                        )}
+                        <p className="text-xs text-muted-foreground">
+                          入库 {formatDateTime(account.inboundAt)}
+                        </p>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="shrink-0"
+                        onClick={() => copyAccount(account)}
+                        aria-label="复制"
+                      >
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </CardContent>
         </Card>

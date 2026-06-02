@@ -192,18 +192,51 @@ function FifoTable({
         {mobileRows.map((account, index) => (
           <div
             key={`${account.id}-${index}-mobile`}
-            className="flex items-center justify-between gap-3 rounded-xl border border-border bg-muted/20 px-3 py-2.5"
+            className="rounded-xl border border-border bg-muted/20 px-3 py-2.5"
           >
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-xs font-semibold text-primary">
-                {index + 1}
-              </span>
-              <span className="truncate font-mono text-sm">{account.username}</span>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-xs font-semibold text-primary">
+                  {index + 1}
+                </span>
+                <span className="truncate font-mono text-sm">{account.username}</span>
+              </div>
+              {index === 0 && (
+                <Badge variant="fifo" className="shrink-0 text-[9px]">
+                  队首
+                </Badge>
+              )}
             </div>
-            {index === 0 && (
-              <Badge variant="fifo" className="shrink-0 text-[9px]">
-                队首
-              </Badge>
+            <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+              <p className="font-mono">密码 {maskValue(account.password)}</p>
+              <p className="whitespace-nowrap">
+                入库 {formatDateTime(account.inboundAt)}
+              </p>
+            </div>
+            {showNotes && (
+              <OutboundNoteField
+                existingNote={account.note}
+                value={
+                  fifoNotesByUsername?.[account.username]?.note ??
+                  account.note ??
+                  ""
+                }
+                onChange={(note) =>
+                  onFifoNoteChange?.(account.username, {
+                    note,
+                    overwriteNote: false,
+                  })
+                }
+                overwriteNote={
+                  fifoNotesByUsername?.[account.username]?.overwriteNote ??
+                  false
+                }
+                onOverwriteNoteChange={(overwriteNote) =>
+                  onFifoNoteChange?.(account.username, { overwriteNote })
+                }
+                className="mt-2 w-full"
+                inputClassName="h-8 w-full text-xs"
+              />
             )}
           </div>
         ))}
@@ -1127,7 +1160,26 @@ export default function DashboardPage() {
                                 {row.email ?? row.url}
                               </p>
                             )}
-                            <p className="break-words">
+                            <OutboundNoteField
+                              existingNote={row.existingAccountNote}
+                              value={row.note ?? ""}
+                              onChange={(note) =>
+                                updatePreviewRow(row.clientId, {
+                                  note,
+                                  overwriteNote: false,
+                                })
+                              }
+                              overwriteNote={row.overwriteNote ?? false}
+                              onOverwriteNoteChange={(overwriteNote) =>
+                                updatePreviewRow(row.clientId, { overwriteNote })
+                              }
+                              disabled={
+                                isCommitResult(row) && row.status === "success"
+                              }
+                              className="mt-2 w-full"
+                              inputClassName="h-8 w-full text-xs"
+                            />
+                            <p className="break-words whitespace-pre-wrap">
                               {resultMessage ||
                                 (row.lastOutboundAt
                                   ? `最近出库：${formatDateTime(row.lastOutboundAt)}`

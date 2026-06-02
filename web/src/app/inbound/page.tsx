@@ -358,7 +358,7 @@ export default function InboundPage() {
             disabled={busy || rulesLoading || !!rulesError}
           />
 
-          <div className="overflow-x-auto rounded-xl border border-border">
+          <div className="hidden overflow-x-auto rounded-xl border border-border md:block">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border bg-muted/40">
@@ -465,6 +465,107 @@ export default function InboundPage() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="space-y-2 md:hidden">
+            {displayedRows.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
+                输入账号文本后会转换为表格
+              </p>
+            ) : (
+              displayedRows.map((row) => {
+                const category = displayCategory(row);
+                const isPending = category === "pending";
+                return (
+                  <div
+                    key={`${row.clientId}-mobile`}
+                    className={cn(
+                      "rounded-xl border border-border p-3",
+                      rowTone(row)
+                    )}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="pt-0.5">
+                        {isPending ? (
+                          <input
+                            type="checkbox"
+                            className="h-5 w-5"
+                            checked={approvedPendingIds.has(row.clientId)}
+                            onChange={(event) => {
+                              setApprovedPendingIds((prev) => {
+                                const next = new Set(prev);
+                                if (event.target.checked) next.add(row.clientId);
+                                else next.delete(row.clientId);
+                                return next;
+                              });
+                            }}
+                            aria-label={`批准 ${row.username ?? row.line}`}
+                          />
+                        ) : (
+                          <span className="block h-5 w-5 rounded-md border border-border bg-background" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={categoryBadge(category)}>
+                            {COUNT_LABELS[category]}
+                          </Badge>
+                          <span className="truncate font-mono text-sm font-medium">
+                            {row.username ?? row.line}
+                          </span>
+                        </div>
+                        <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                          {row.password && (
+                            <p className="truncate font-mono">
+                              密码 {maskValue(row.password)}
+                            </p>
+                          )}
+                          {row.email && (
+                            <p className="truncate font-mono">{row.email}</p>
+                          )}
+                          {row.url && (
+                            <p className="break-all font-mono">{row.url}</p>
+                          )}
+                          <OutboundNoteField
+                            existingNote={row.existingAccountNote}
+                            value={row.note ?? ""}
+                            onChange={(note) =>
+                              updateDraftRow(row.clientId, {
+                                note,
+                                overwriteNote: false,
+                              })
+                            }
+                            overwriteNote={row.overwriteNote ?? false}
+                            onOverwriteNoteChange={(overwriteNote) =>
+                              updateDraftRow(row.clientId, { overwriteNote })
+                            }
+                            disabled={
+                              isCommitResult(row) && row.status === "success"
+                            }
+                            className="mt-2 w-full"
+                            inputClassName="h-8 w-full text-xs"
+                          />
+                          <p className="break-words whitespace-pre-wrap">
+                            {displayMessage(row)}
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="shrink-0"
+                        onClick={() =>
+                          setDeletedIds((prev) => new Set(prev).add(row.clientId))
+                        }
+                        aria-label="删除条目"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </CardContent>
       </Card>

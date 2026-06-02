@@ -246,7 +246,7 @@ function SearchContent() {
                         </p>
                       )}
                       {r.account.note?.trim() && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="break-words whitespace-pre-wrap text-xs text-muted-foreground">
                           备注：{highlight(r.account.note, query)}
                         </p>
                       )}

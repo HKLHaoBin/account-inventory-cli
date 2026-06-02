@@ -279,7 +279,7 @@ export default function OutboundPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-hidden rounded-xl border border-border">
+          <div className="hidden overflow-hidden rounded-xl border border-border md:block">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border bg-muted/40">
@@ -336,6 +336,60 @@ export default function OutboundPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          <div className="space-y-2 md:hidden">
+            {preview.map((account, i) => (
+              <div
+                key={`${account.id}-mobile`}
+                className="rounded-xl border border-border bg-muted/20 px-3 py-2.5"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-xs font-semibold text-primary">
+                      {i + 1}
+                    </span>
+                    <span className="truncate font-mono text-sm">
+                      {account.username}
+                    </span>
+                  </div>
+                  {i === 0 && (
+                    <Badge variant="fifo" className="shrink-0 text-[9px]">
+                      队首
+                    </Badge>
+                  )}
+                </div>
+                <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  <PasswordField value={account.password} />
+                  <p className="whitespace-nowrap">
+                    入库 {formatDateTime(account.inboundAt)}
+                  </p>
+                </div>
+                <OutboundNoteField
+                  existingNote={account.note}
+                  value={
+                    fifoNotesByUsername[account.username]?.note ??
+                    account.note ??
+                    ""
+                  }
+                  onChange={(note) =>
+                    updateFifoNote(account.username, {
+                      note,
+                      overwriteNote: false,
+                    })
+                  }
+                  overwriteNote={
+                    fifoNotesByUsername[account.username]?.overwriteNote ??
+                    false
+                  }
+                  onOverwriteNoteChange={(overwriteNote) =>
+                    updateFifoNote(account.username, { overwriteNote })
+                  }
+                  className="mt-2 w-full"
+                  inputClassName="h-8 w-full text-xs"
+                />
+              </div>
+            ))}
           </div>
         </CardContent>
       </Card>

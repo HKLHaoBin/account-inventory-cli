@@ -113,7 +113,7 @@ export function HistoryTable({
           </h2>
           <Card>
             <CardContent className="p-0">
-              <div className="overflow-x-auto">
+              <div className="hidden overflow-x-auto md:block">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border bg-muted/40">
@@ -180,7 +180,7 @@ export function HistoryTable({
                               )}
                             </td>
                           )}
-                          <td className="max-w-[200px] truncate px-4 py-3 text-xs text-muted-foreground">
+                          <td className="break-words whitespace-pre-wrap px-4 py-3 text-xs text-muted-foreground">
                             {record.note?.trim() ? record.note : "—"}
                           </td>
                           <td className="px-4 py-3">
@@ -198,6 +198,70 @@ export function HistoryTable({
                     })}
                   </tbody>
                 </table>
+              </div>
+
+              <div className="space-y-2 p-3 md:hidden">
+                {group.items.map((record) => {
+                  const history = isHistoryRecord(record) ? record : null;
+                  const outbound = isOutboundRecord(record) ? record : null;
+                  return (
+                    <div
+                      key={`${record.id}-mobile`}
+                      className="rounded-xl border border-border p-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {mode === "all" && history && (
+                              <Badge
+                                variant={
+                                  history.type === "inbound" ? "inventory" : "history"
+                                }
+                              >
+                                {history.type === "inbound" ? "入库" : "出库"}
+                              </Badge>
+                            )}
+                            <span className="font-mono text-sm font-medium">
+                              {record.username}
+                            </span>
+                          </div>
+                          <PasswordField value={record.password} />
+                          {record.email && (
+                            <span className="text-xs">{record.email}</span>
+                          )}
+                          {record.inboundAt && (
+                            <p className="text-xs text-muted-foreground">
+                              入库 {formatDateTime(record.inboundAt)}
+                            </p>
+                          )}
+                          {(mode === "outbound" || mode === "all") &&
+                            (outbound?.outboundAt || history?.outboundAt) && (
+                              <p className="text-xs text-muted-foreground">
+                                出库{" "}
+                                {formatDateTime(
+                                  outbound?.outboundAt ?? history?.outboundAt ?? ""
+                                )}
+                              </p>
+                            )}
+                          {record.note?.trim() && (
+                            <p className="break-words whitespace-pre-wrap text-xs text-muted-foreground">
+                              备注：{record.note}
+                            </p>
+                          )}
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="shrink-0"
+                          title="复制"
+                          onClick={() => copyLine(record)}
+                        >
+                          <Copy className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </CardContent>
           </Card>
