@@ -39,7 +39,15 @@ const CATEGORY_LABELS: Record<InboundCategory, string> = {
   batchDuplicate: "批次内重复",
 };
 
-function categoryBadge(category: InboundCategory) {
+type InboundCountKey = InboundCategory | "success";
+
+const COUNT_LABELS: Record<InboundCountKey, string> = {
+  success: "入库成功",
+  ...CATEGORY_LABELS,
+};
+
+function categoryBadge(category: InboundCategory | "success") {
+  if (category === "success") return "success";
   if (category === "ready") return "success";
   if (category === "pending") return "warning";
   if (category === "duplicate" || category === "batchDuplicate") return "error";
@@ -60,6 +68,18 @@ function rowTone(row: InboundPreviewRow | InboundCommitResultRow) {
   }
   if (row.category === "invalid") return "bg-muted/40";
   return "bg-muted/20";
+}
+
+function displayCategory(row: InboundPreviewRow | InboundCommitResultRow) {
+  return isCommitResult(row) && row.status === "success" ? "success" : row.category;
+}
+
+function canCommitRow(
+  row: InboundPreviewRow | InboundCommitResultRow,
+  approvedPendingIds: Set<string>
+) {
+  if (!isCommitResult(row)) return true;
+  return row.status === "warning" && approvedPendingIds.has(row.clientId);
 }
 
 function buildDraftRows(text: string): InboundPreviewRow[] {
@@ -184,23 +204,24 @@ export default function InboundPage() {
   const counts = useMemo(() => {
     return displayedRows.reduce(
       (acc, row) => {
-        acc[row.category] += 1;
+        acc[displayCategory(row)] += 1;
         return acc;
       },
       {
+        success: 0,
         ready: 0,
         duplicate: 0,
         pending: 0,
         invalid: 0,
         batchDuplicate: 0,
-      } as Record<InboundCategory, number>
+      } as Record<InboundCountKey, number>
     );
   }, [displayedRows]);
 
   const commitRows = displayedRows
-    .filter((row) => !isCommitResult(row) || row.status === "warning")
+    .filter((row) => canCommitRow(row, approvedPendingIds))
     .map((row) => ({ clientId: row.clientId, line: row.line }));
-  const approvedCount = counts.ready + approvedPendingIds.size;
+  const approvedCount = commitRows.length;
 
   async function handleConfirm() {
     if (commitRows.length === 0) return;
@@ -208,7 +229,8 @@ export default function InboundPage() {
     setMessage("");
     try {
       const payload = await commitInbound(commitRows, Array.from(approvedPendingIds));
-      const nextRows = new Map(payload.rows.map((row) => [row.clientId, row]));
+      const nextRows = new Map(resultRowsRef.current);
+      for (const row of payload.rows) nextRows.set(row.clientId, row);
       resultRowsRef.current = nextRows;
       setResultRows(nextRows);
       setMessage(
@@ -279,9 +301,9 @@ export default function InboundPage() {
           />
 
           <div className="flex flex-wrap gap-2">
-            {(Object.keys(CATEGORY_LABELS) as InboundCategory[]).map((category) => (
+            {(Object.keys(COUNT_LABELS) as InboundCountKey[]).map((category) => (
               <Badge key={category} variant={categoryBadge(category)}>
-                {CATEGORY_LABELS[category]} {counts[category]}
+                {COUNT_LABELS[category]} {counts[category]}
               </Badge>
             ))}
           </div>
@@ -308,64 +330,67 @@ export default function InboundPage() {
                     </td>
                   </tr>
                 ) : (
-                  displayedRows.map((row) => (
-                    <tr
-                      key={row.clientId}
-                      className={cn("border-b border-border last:border-0", rowTone(row))}
-                    >
-                      <td className="px-3 py-2.5">
-                        {row.category === "pending" ? (
-                          <input
-                            type="checkbox"
-                            checked={approvedPendingIds.has(row.clientId)}
-                            onChange={(event) => {
-                              setApprovedPendingIds((prev) => {
-                                const next = new Set(prev);
-                                if (event.target.checked) next.add(row.clientId);
-                                else next.delete(row.clientId);
-                                return next;
-                              });
-                            }}
-                            aria-label={`批准 ${row.username ?? row.line}`}
-                          />
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <Badge variant={categoryBadge(row.category)}>
-                          {CATEGORY_LABELS[row.category]}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-2.5 font-mono text-xs">
-                        {row.username ?? row.line}
-                      </td>
-                      <td className="px-3 py-2.5 font-mono text-xs">
-                        {row.password ? maskValue(row.password) : "-"}
-                      </td>
-                      <td className="px-3 py-2.5 font-mono text-xs">
-                        {row.email ?? "-"}
-                      </td>
-                      <td className="max-w-[220px] truncate px-3 py-2.5 font-mono text-xs">
-                        {row.url ?? "-"}
-                      </td>
-                      <td className="px-3 py-2.5 text-xs text-muted-foreground">
-                        {displayMessage(row)}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() =>
-                            setDeletedIds((prev) => new Set(prev).add(row.clientId))
-                          }
-                          aria-label="删除条目"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </td>
-                    </tr>
-                  ))
+                  displayedRows.map((row) => {
+                    const category = displayCategory(row);
+                    return (
+                      <tr
+                        key={row.clientId}
+                        className={cn("border-b border-border last:border-0", rowTone(row))}
+                      >
+                        <td className="px-3 py-2.5">
+                          {category === "pending" ? (
+                            <input
+                              type="checkbox"
+                              checked={approvedPendingIds.has(row.clientId)}
+                              onChange={(event) => {
+                                setApprovedPendingIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (event.target.checked) next.add(row.clientId);
+                                  else next.delete(row.clientId);
+                                  return next;
+                                });
+                              }}
+                              aria-label={`批准 ${row.username ?? row.line}`}
+                            />
+                          ) : (
+                            <span className="text-muted-foreground">-</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <Badge variant={categoryBadge(category)}>
+                            {COUNT_LABELS[category]}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2.5 font-mono text-xs">
+                          {row.username ?? row.line}
+                        </td>
+                        <td className="px-3 py-2.5 font-mono text-xs">
+                          {row.password ? maskValue(row.password) : "-"}
+                        </td>
+                        <td className="px-3 py-2.5 font-mono text-xs">
+                          {row.email ?? "-"}
+                        </td>
+                        <td className="max-w-[220px] truncate px-3 py-2.5 font-mono text-xs">
+                          {row.url ?? "-"}
+                        </td>
+                        <td className="px-3 py-2.5 text-xs text-muted-foreground">
+                          {displayMessage(row)}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() =>
+                              setDeletedIds((prev) => new Set(prev).add(row.clientId))
+                            }
+                            aria-label="删除条目"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>

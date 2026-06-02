@@ -60,7 +60,15 @@ const CATEGORY_LABELS: Record<InboundCategory, string> = {
   batchDuplicate: "批次内重复",
 };
 
-function categoryBadge(category: InboundCategory) {
+type InboundCountKey = InboundCategory | "success";
+
+const COUNT_LABELS: Record<InboundCountKey, string> = {
+  success: "入库成功",
+  ...CATEGORY_LABELS,
+};
+
+function categoryBadge(category: InboundCategory | "success") {
+  if (category === "success") return "success";
   if (category === "ready") return "success";
   if (category === "pending") return "warning";
   if (category === "duplicate" || category === "batchDuplicate") return "error";
@@ -86,6 +94,18 @@ function rowTone(row: InboundPreviewRow | InboundCommitResultRow) {
     return "bg-red-50/60 dark:bg-red-950/20";
   }
   return "";
+}
+
+function displayCategory(row: InboundPreviewRow | InboundCommitResultRow) {
+  return isCommitResult(row) && row.status === "success" ? "success" : row.category;
+}
+
+function canCommitRow(
+  row: InboundPreviewRow | InboundCommitResultRow,
+  approvedPendingIds: Set<string>
+) {
+  if (!isCommitResult(row)) return true;
+  return row.status === "warning" && approvedPendingIds.has(row.clientId);
 }
 
 function AccountCell({ value }: { value?: string | null }) {
@@ -391,33 +411,34 @@ export default function DashboardPage() {
   }, [deletedIds, previewRows, resultRows]);
 
   const pendingRows = useMemo(
-    () => displayedRows.filter((row) => row.category === "pending"),
+    () => displayedRows.filter((row) => displayCategory(row) === "pending"),
     [displayedRows]
   );
 
   const counts = useMemo(() => {
     return displayedRows.reduce(
       (acc, row) => {
-        acc[row.category] += 1;
+        acc[displayCategory(row)] += 1;
         return acc;
       },
       {
+        success: 0,
         ready: 0,
         duplicate: 0,
         pending: 0,
         invalid: 0,
         batchDuplicate: 0,
-      } as Record<InboundCategory, number>
+      } as Record<InboundCountKey, number>
     );
   }, [displayedRows]);
 
   const commitRows = displayedRows
-    .filter((row) => !isCommitResult(row) || row.status === "warning")
+    .filter((row) => canCommitRow(row, approvedPendingIds))
     .map((row) => ({
       clientId: row.clientId,
       line: row.line,
     }));
-  const approvedReadyCount = counts.ready + approvedPendingIds.size;
+  const approvedReadyCount = commitRows.length;
   const fifoChips = useMemo(() => {
     const max = fifoPreview.max || dashboard.stats.inventoryCount || 0;
     return Array.from(new Set([1, 5, 10, max].filter((n) => n > 0)));
@@ -489,7 +510,8 @@ export default function DashboardPage() {
         commitRows,
         Array.from(approvedPendingIds)
       );
-      const nextResultRows = new Map(payload.rows.map((row) => [row.clientId, row]));
+      const nextResultRows = new Map(resultRowsRef.current);
+      for (const row of payload.rows) nextResultRows.set(row.clientId, row);
       resultRowsRef.current = nextResultRows;
       setResultRows(nextResultRows);
       await loadDashboard();
@@ -707,7 +729,7 @@ export default function DashboardPage() {
                   setApprovedPendingIds(
                     new Set(
                       displayedRows
-                        .filter((row) => row.category === "pending")
+                        .filter((row) => displayCategory(row) === "pending")
                         .map((row) => row.clientId)
                     )
                   )
@@ -743,9 +765,9 @@ export default function DashboardPage() {
             />
 
             <div className="flex flex-wrap gap-2">
-              {(Object.keys(CATEGORY_LABELS) as InboundCategory[]).map((category) => (
+              {(Object.keys(COUNT_LABELS) as InboundCountKey[]).map((category) => (
                 <Badge key={category} variant={categoryBadge(category)}>
-                  {CATEGORY_LABELS[category]} {counts[category]}
+                  {COUNT_LABELS[category]} {counts[category]}
                 </Badge>
               ))}
             </div>
@@ -778,7 +800,8 @@ export default function DashboardPage() {
                     </tr>
                   ) : (
                     displayedRows.map((row) => {
-                      const isPending = row.category === "pending";
+                      const category = displayCategory(row);
+                      const isPending = category === "pending";
                       const isKeyboardCursor = row.clientId === pendingCursorId;
                       const resultMessage = isCommitResult(row)
                         ? row.message
@@ -816,8 +839,8 @@ export default function DashboardPage() {
                             )}
                           </td>
                           <td className="px-3 py-2.5">
-                            <Badge variant={categoryBadge(row.category)}>
-                              {CATEGORY_LABELS[row.category]}
+                            <Badge variant={categoryBadge(category)}>
+                              {COUNT_LABELS[category]}
                             </Badge>
                           </td>
                           <td className="px-3 py-2.5">
@@ -865,7 +888,8 @@ export default function DashboardPage() {
                 </p>
               ) : (
                 displayedRows.map((row) => {
-                  const isPending = row.category === "pending";
+                  const category = displayCategory(row);
+                  const isPending = category === "pending";
                   const isKeyboardCursor = row.clientId === pendingCursorId;
                   const resultMessage = isCommitResult(row)
                     ? row.message
@@ -905,8 +929,8 @@ export default function DashboardPage() {
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <Badge variant={categoryBadge(row.category)}>
-                              {CATEGORY_LABELS[row.category]}
+                            <Badge variant={categoryBadge(category)}>
+                              {COUNT_LABELS[category]}
                             </Badge>
                             <span className="truncate font-mono text-sm font-medium">
                               {row.username ?? row.line}
