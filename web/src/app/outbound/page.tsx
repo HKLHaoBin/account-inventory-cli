@@ -1,62 +1,151 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Minus, Plus, Copy, Check, Package, Download } from "lucide-react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
 import { PasswordField } from "@/components/ui/password-field";
-import { writeOutboundClipboardText } from "@/lib/api";
+import { BatchNoteControls } from "@/components/notes/batch-note-controls";
+import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import {
+  commitFifo,
+  previewFifo,
+  writeOutboundClipboardText,
+} from "@/lib/api";
+import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
-import { mockInventory } from "@/lib/mock-data";
-import { formatAccountLine, formatDateTime } from "@/lib/utils";
-import Link from "next/link";
+import { formatDateTime } from "@/lib/utils";
+import type { FifoNoteEntry } from "@/types/account";
 
 export default function OutboundPage() {
-  const max = mockInventory.length;
   const [quantity, setQuantity] = useState(1);
+  const [fifoPreview, setFifoPreview] = useState({
+    max: 0,
+    quantity: 0,
+    rows: [] as Awaited<ReturnType<typeof previewFifo>>["rows"],
+  });
+  const [fifoNotes, setFifoNotes] = useState<FifoNoteEntry[]>([]);
+  const [fifoBusy, setFifoBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [resultMessage, setResultMessage] = useState("");
   const [resultOpen, setResultOpen] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
 
+  const max = fifoPreview.max;
   const clamped = Math.min(Math.max(quantity, 0), max);
-  const preview = mockInventory.slice(0, clamped);
-  const chips = [1, 5, 10, max];
+  const preview = fifoPreview.rows;
+  const chips = useMemo(
+    () => Array.from(new Set([1, 5, 10, max].filter((n) => n > 0))),
+    [max]
+  );
 
-  const outboundText = () =>
-    preview
-      .map((a) =>
-        formatAccountLine(
-          a.username,
-          a.password,
-          a.email,
-          a.emailPassword,
-          a.url
-        )
+  const fifoNotesByUsername = useMemo(
+    () =>
+      Object.fromEntries(
+        fifoNotes.map((entry) => [
+          entry.username,
+          {
+            note: entry.note ?? "",
+            overwriteNote: entry.overwriteNote ?? false,
+          },
+        ])
+      ),
+    [fifoNotes]
+  );
+
+  useEffect(() => {
+    let ignore = false;
+    async function loadPreview() {
+      try {
+        const payload = await previewFifo(quantity);
+        if (ignore) return;
+        setFifoPreview(payload);
+        setFifoNotes((current) => {
+          const byUsername = new Map(
+            current.map((entry) => [entry.username, entry])
+          );
+          return payload.rows.map((row) => {
+            const existing = byUsername.get(row.username);
+            return {
+              username: row.username,
+              note: existing?.note ?? row.note ?? "",
+              overwriteNote: existing?.overwriteNote ?? false,
+            };
+          });
+        });
+        setLoadError("");
+      } catch (error) {
+        if (ignore) return;
+        setLoadError(error instanceof Error ? error.message : "FIFO 预览失败");
+      }
+    }
+    void loadPreview();
+    return () => {
+      ignore = true;
+    };
+  }, [quantity, reloadToken]);
+
+  useEffect(
+    () => subscribeDatabaseChanged(() => setReloadToken((token) => token + 1)),
+    []
+  );
+
+  function updateFifoNote(
+    username: string,
+    patch: Partial<{ note: string; overwriteNote: boolean }>
+  ) {
+    setFifoNotes((entries) =>
+      entries.map((entry) =>
+        entry.username === username
+          ? {
+              ...entry,
+              ...(patch.note !== undefined
+                ? { note: patch.note, overwriteNote: false }
+                : {}),
+              ...(patch.overwriteNote !== undefined
+                ? { overwriteNote: patch.overwriteNote }
+                : {}),
+            }
+          : entry
       )
-      .join("\n");
+    );
+  }
 
   const handleOutbound = async (mode: "clipboard" | "txt") => {
-    if (clamped === 0) return;
-    const text = outboundText();
-    if (mode === "clipboard") {
-      await writeOutboundClipboardText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } else {
-      downloadTextFile(text);
-      setCopied(false);
+    if (clamped === 0 || fifoBusy) return;
+    setFifoBusy(true);
+    try {
+      const payload = await commitFifo(quantity, fifoNotes);
+      if (payload.clipboardText) {
+        if (mode === "clipboard") {
+          await writeOutboundClipboardText(payload.clipboardText);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        } else {
+          downloadTextFile(payload.clipboardText);
+          setCopied(false);
+        }
+      }
+      setResultMessage(
+        mode === "clipboard"
+          ? `已出库 ${payload.quantity} 条并复制到剪贴板`
+          : `已出库 ${payload.quantity} 条并下载 TXT`
+      );
+      setResultOpen(true);
+      setQuantity(1);
+      setReloadToken((token) => token + 1);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "FIFO 出库失败");
+    } finally {
+      setFifoBusy(false);
     }
-    setResultMessage(
-      mode === "clipboard"
-        ? `已出库 ${clamped} 条并复制到剪贴板`
-        : `已出库 ${clamped} 条并下载 TXT`
-    );
-    setResultOpen(true);
   };
 
-  if (max === 0) {
+  if (max === 0 && !loadError) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
         <Package className="h-12 w-12 text-muted-foreground" />
@@ -78,6 +167,9 @@ export default function OutboundPage() {
         <Badge variant="default" className="mt-3">
           当前库存 {max} 条
         </Badge>
+        {loadError && (
+          <p className="mt-2 text-sm text-red-600">{loadError}</p>
+        )}
       </div>
 
       <Card>
@@ -136,12 +228,31 @@ export default function OutboundPage() {
             </p>
           )}
 
+          <BatchNoteControls
+            rows={fifoNotes.map((entry) => ({
+              clientId: entry.username,
+              username: entry.username,
+              note: entry.note,
+              overwriteNote: entry.overwriteNote,
+            }))}
+            onRowsChange={(rows) =>
+              setFifoNotes(
+                rows.map((row) => ({
+                  username: row.username ?? "",
+                  note: row.note,
+                  overwriteNote: row.overwriteNote,
+                }))
+              )
+            }
+            disabled={fifoBusy}
+          />
+
           <div className="grid gap-2 sm:grid-cols-2">
             <Button
               className="w-full"
               size="lg"
               onClick={() => handleOutbound("clipboard")}
-              disabled={clamped === 0}
+              disabled={clamped === 0 || fifoBusy}
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               出库并复制
@@ -151,7 +262,7 @@ export default function OutboundPage() {
               variant="secondary"
               size="lg"
               onClick={() => handleOutbound("txt")}
-              disabled={clamped === 0}
+              disabled={clamped === 0 || fifoBusy}
             >
               <Download className="h-4 w-4" />
               出库并下载 TXT
@@ -176,6 +287,7 @@ export default function OutboundPage() {
                   <th className="px-4 py-2.5 text-left font-medium">账号</th>
                   <th className="px-4 py-2.5 text-left font-medium">密码</th>
                   <th className="px-4 py-2.5 text-left font-medium">入库时间</th>
+                  <th className="px-4 py-2.5 text-left font-medium">备注</th>
                 </tr>
               </thead>
               <tbody>
@@ -196,6 +308,30 @@ export default function OutboundPage() {
                     <td className="px-4 py-2.5 text-xs text-muted-foreground">
                       {formatDateTime(account.inboundAt)}
                     </td>
+                    <td className="min-w-[140px] px-4 py-2.5">
+                      <OutboundNoteField
+                        existingNote={account.note}
+                        value={
+                          fifoNotesByUsername[account.username]?.note ??
+                          account.note ??
+                          ""
+                        }
+                        onChange={(note) =>
+                          updateFifoNote(account.username, {
+                            note,
+                            overwriteNote: false,
+                          })
+                        }
+                        overwriteNote={
+                          fifoNotesByUsername[account.username]?.overwriteNote ??
+                          false
+                        }
+                        onOverwriteNoteChange={(overwriteNote) =>
+                          updateFifoNote(account.username, { overwriteNote })
+                        }
+                        inputClassName="h-8 text-xs"
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -211,7 +347,14 @@ export default function OutboundPage() {
         description={resultMessage}
         footer={
           <>
-            <Button variant="secondary" onClick={() => { setResultOpen(false); setQuantity(1); }}>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setResultOpen(false);
+                setQuantity(1);
+                setReloadToken((token) => token + 1);
+              }}
+            >
               再次出库
             </Button>
             <Button onClick={() => setResultOpen(false)}>完成</Button>

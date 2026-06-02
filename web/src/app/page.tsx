@@ -19,6 +19,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/input";
+import { BatchNoteControls } from "@/components/notes/batch-note-controls";
+import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import {
   commitFifo,
   commitInbound,
@@ -26,6 +28,7 @@ import {
   previewFifo,
   writeOutboundClipboardText,
 } from "@/lib/api";
+import { useAccountNotesLookup } from "@/lib/use-account-notes-lookup";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
@@ -41,6 +44,7 @@ import type {
   InboundCategory,
   InboundCommitResultRow,
   InboundPreviewRow,
+  FifoNoteEntry,
 } from "@/types/account";
 
 const EMPTY_DASHBOARD: DashboardPayload = {
@@ -156,10 +160,21 @@ function buildDraftRows(text: string, separators: string[]): InboundPreviewRow[]
 function FifoTable({
   rows,
   mobileLimit,
+  fifoNotesByUsername,
+  onFifoNoteChange,
 }: {
   rows: Account[];
   mobileLimit?: number;
+  fifoNotesByUsername?: Record<
+    string,
+    { note: string; overwriteNote: boolean }
+  >;
+  onFifoNoteChange?: (
+    username: string,
+    patch: Partial<{ note: string; overwriteNote: boolean }>
+  ) => void;
 }) {
+  const showNotes = Boolean(onFifoNoteChange);
   if (rows.length === 0) {
     return (
       <p className="rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
@@ -207,6 +222,9 @@ function FifoTable({
               <th className="px-3 py-2.5 text-left font-medium">账号</th>
               <th className="px-3 py-2.5 text-left font-medium">密码</th>
               <th className="px-3 py-2.5 text-left font-medium">入库时间</th>
+              {showNotes && (
+                <th className="px-3 py-2.5 text-left font-medium">备注</th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -229,6 +247,32 @@ function FifoTable({
                 <td className="px-3 py-2.5 text-xs text-muted-foreground whitespace-nowrap">
                   {formatDateTime(account.inboundAt)}
                 </td>
+                {showNotes && (
+                  <td className="min-w-[140px] px-3 py-2.5">
+                    <OutboundNoteField
+                      existingNote={account.note}
+                      value={
+                        fifoNotesByUsername?.[account.username]?.note ??
+                        account.note ??
+                        ""
+                      }
+                      onChange={(note) =>
+                        onFifoNoteChange?.(account.username, {
+                          note,
+                          overwriteNote: false,
+                        })
+                      }
+                      overwriteNote={
+                        fifoNotesByUsername?.[account.username]?.overwriteNote ??
+                        false
+                      }
+                      onOverwriteNoteChange={(overwriteNote) =>
+                        onFifoNoteChange?.(account.username, { overwriteNote })
+                      }
+                      inputClassName="h-8 text-xs"
+                    />
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -309,6 +353,7 @@ export default function DashboardPage() {
   });
   const [fifoBusy, setFifoBusy] = useState(false);
   const [fifoMessage, setFifoMessage] = useState("");
+  const [fifoNotes, setFifoNotes] = useState<FifoNoteEntry[]>([]);
 
   const replaceInboundText = useCallback((value: string) => {
     inboundTextRef.current = value;
@@ -365,6 +410,49 @@ export default function DashboardPage() {
     setPreviewRows(buildDraftRows(inboundTextRef.current, enabledSeparators));
   }, [enabledSeparators, rulesReady]);
 
+  useAccountNotesLookup(previewRows, setPreviewRows, rulesReady);
+
+  function updatePreviewRow(clientId: string, patch: Partial<InboundPreviewRow>) {
+    setPreviewRows((rows) =>
+      rows.map((row) => (row.clientId === clientId ? { ...row, ...patch } : row))
+    );
+  }
+
+  const fifoNotesByUsername = useMemo(
+    () =>
+      Object.fromEntries(
+        fifoNotes.map((entry) => [
+          entry.username,
+          {
+            note: entry.note ?? "",
+            overwriteNote: entry.overwriteNote ?? false,
+          },
+        ])
+      ),
+    [fifoNotes]
+  );
+
+  function updateFifoNote(
+    username: string,
+    patch: Partial<{ note: string; overwriteNote: boolean }>
+  ) {
+    setFifoNotes((entries) =>
+      entries.map((entry) =>
+        entry.username === username
+          ? {
+              ...entry,
+              ...(patch.note !== undefined
+                ? { note: patch.note, overwriteNote: false }
+                : {}),
+              ...(patch.overwriteNote !== undefined
+                ? { overwriteNote: patch.overwriteNote }
+                : {}),
+            }
+          : entry
+      )
+    );
+  }
+
   useEffect(() => {
     let socket: WebSocket | null = null;
     let stopped = false;
@@ -418,6 +506,19 @@ export default function DashboardPage() {
         const payload = await previewFifo(fifoQuantity);
         if (ignore) return;
         setFifoPreview(payload);
+        setFifoNotes((current) => {
+          const byUsername = new Map(
+            current.map((entry) => [entry.username, entry])
+          );
+          return payload.rows.map((row) => {
+            const existing = byUsername.get(row.username);
+            return {
+              username: row.username,
+              note: existing?.note ?? row.note ?? "",
+              overwriteNote: existing?.overwriteNote ?? false,
+            };
+          });
+        });
         setFifoMessage("");
       } catch (error) {
         if (ignore) return;
@@ -463,6 +564,8 @@ export default function DashboardPage() {
     .map((row) => ({
       clientId: row.clientId,
       line: row.line,
+      note: row.note,
+      overwriteNote: row.overwriteNote,
     }));
   const approvedReadyCount = commitRows.length;
   const fifoChips = useMemo(() => {
@@ -553,7 +656,7 @@ export default function DashboardPage() {
     if (fifoPreview.quantity <= 0) return;
     setFifoBusy(true);
     try {
-      const payload = await commitFifo(fifoQuantity);
+      const payload = await commitFifo(fifoQuantity, fifoNotes);
       if (payload.clipboardText) {
         if (mode === "clipboard") {
           await writeOutboundClipboardText(payload.clipboardText);
@@ -811,6 +914,12 @@ export default function DashboardPage() {
               <p className="text-xs text-primary">{keyboardMessage}</p>
             )}
 
+            <BatchNoteControls
+              rows={previewRows}
+              onRowsChange={setPreviewRows}
+              disabled={inboundBusy || rulesLoading || !!rulesError}
+            />
+
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
               <Button
                 className="w-full sm:w-auto"
@@ -837,6 +946,7 @@ export default function DashboardPage() {
                     <th className="px-3 py-2.5 text-left font-medium">密码</th>
                     <th className="px-3 py-2.5 text-left font-medium">邮箱</th>
                     <th className="px-3 py-2.5 text-left font-medium">网址</th>
+                    <th className="px-3 py-2.5 text-left font-medium">备注</th>
                     <th className="px-3 py-2.5 text-left font-medium">信息</th>
                     <th className="w-12 px-3 py-2.5 text-left font-medium">操作</th>
                   </tr>
@@ -844,7 +954,7 @@ export default function DashboardPage() {
                 <tbody>
                   {displayedRows.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">
+                      <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
                         输入账号文本后会自动转换为表格
                       </td>
                     </tr>
@@ -904,6 +1014,26 @@ export default function DashboardPage() {
                           </td>
                           <td className="max-w-[180px] truncate px-3 py-2.5">
                             <AccountCell value={row.url} />
+                          </td>
+                          <td className="min-w-[140px] px-3 py-2.5">
+                            <OutboundNoteField
+                              existingNote={row.existingAccountNote}
+                              value={row.note ?? ""}
+                              onChange={(note) =>
+                                updatePreviewRow(row.clientId, {
+                                  note,
+                                  overwriteNote: false,
+                                })
+                              }
+                              overwriteNote={row.overwriteNote ?? false}
+                              onOverwriteNoteChange={(overwriteNote) =>
+                                updatePreviewRow(row.clientId, { overwriteNote })
+                              }
+                              disabled={
+                                isCommitResult(row) && row.status === "success"
+                              }
+                              inputClassName="h-8 text-xs"
+                            />
                           </td>
                           <td className="px-3 py-2.5 text-xs text-muted-foreground">
                             {resultMessage ||
@@ -1078,7 +1208,30 @@ export default function DashboardPage() {
               ))}
             </div>
 
-            <FifoTable rows={fifoPreview.rows} />
+            <BatchNoteControls
+              rows={fifoNotes.map((entry) => ({
+                clientId: entry.username,
+                username: entry.username,
+                note: entry.note,
+                overwriteNote: entry.overwriteNote,
+              }))}
+              onRowsChange={(rows) =>
+                setFifoNotes(
+                  rows.map((row) => ({
+                    username: row.username ?? "",
+                    note: row.note,
+                    overwriteNote: row.overwriteNote,
+                  }))
+                )
+              }
+              disabled={fifoBusy}
+            />
+
+            <FifoTable
+              rows={fifoPreview.rows}
+              fifoNotesByUsername={fifoNotesByUsername}
+              onFifoNoteChange={updateFifoNote}
+            />
 
             {fifoMessage && (
               <p

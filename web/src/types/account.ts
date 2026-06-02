@@ -6,6 +6,7 @@ export interface Account {
   emailPassword?: string;
   url?: string;
   inboundAt: string;
+  note?: string | null;
 }
 
 export interface OutboundRecord {
@@ -18,6 +19,7 @@ export interface OutboundRecord {
   inboundAt: string | null;
   inboundRecordId?: string | null;
   outboundAt: string;
+  note?: string | null;
 }
 
 export interface InboundRecord {
@@ -28,6 +30,7 @@ export interface InboundRecord {
   emailPassword?: string;
   url?: string;
   inboundAt: string;
+  note?: string | null;
 }
 
 export type HistoryType = "inbound" | "outbound";
@@ -48,6 +51,7 @@ export interface HistoryRecord {
   inboundAt: string | null;
   outboundAt?: string;
   timestamp: string;
+  note?: string | null;
 }
 
 export interface ParsedAccount {
@@ -102,6 +106,10 @@ export interface OutboundPasteRow {
   status?: "success" | "error";
   message?: string | null;
   reason?: string | null;
+  note?: string | null;
+  overwriteNote?: boolean;
+  /** UI-only: account note from DB before user edits (inbound/paste lookup). */
+  existingAccountNote?: string | null;
 }
 
 export interface ActivityItem {
@@ -199,6 +207,16 @@ export interface InboundPreviewRow {
   lastOutboundAt?: string | null;
   selected?: boolean;
   deleted?: boolean;
+  note?: string | null;
+  overwriteNote?: boolean;
+  /** UI-only: account note from DB before user edits (inbound lookup). */
+  existingAccountNote?: string | null;
+}
+
+export interface FifoNoteEntry {
+  username: string;
+  note?: string | null;
+  overwriteNote?: boolean;
 }
 
 export type InboundCommitStatus =

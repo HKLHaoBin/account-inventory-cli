@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Minus, Plus, Copy, Check, Download } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { BatchNoteControls } from "@/components/notes/batch-note-controls";
+import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { commitFifo, previewFifo, writeOutboundClipboardText } from "@/lib/api";
 import { downloadTextFile } from "@/lib/download";
-import type { Account } from "@/types/account";
+import type { Account, FifoNoteEntry } from "@/types/account";
 
 interface QuickOutboundModalProps {
   open: boolean;
@@ -26,9 +28,26 @@ export function QuickOutboundModal({
   const [successMessage, setSuccessMessage] = useState("");
   const [max, setMax] = useState(0);
   const [preview, setPreview] = useState<Account[]>([]);
+  const [fifoNotes, setFifoNotes] = useState<FifoNoteEntry[]>([]);
   const [message, setMessage] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
+  const [busy, setBusy] = useState(false);
 
   const clamped = Math.min(Math.max(quantity, 0), max);
+
+  const fifoNotesByUsername = useMemo(
+    () =>
+      Object.fromEntries(
+        fifoNotes.map((entry) => [
+          entry.username,
+          {
+            note: entry.note ?? "",
+            overwriteNote: entry.overwriteNote ?? false,
+          },
+        ])
+      ),
+    [fifoNotes]
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -39,22 +58,57 @@ export function QuickOutboundModal({
         if (ignore) return;
         setMax(payload.max);
         setPreview(payload.rows);
+        setFifoNotes((current) => {
+          const byUsername = new Map(
+            current.map((entry) => [entry.username, entry])
+          );
+          return payload.rows.map((row) => {
+            const existing = byUsername.get(row.username);
+            return {
+              username: row.username,
+              note: existing?.note ?? row.note ?? "",
+              overwriteNote: existing?.overwriteNote ?? false,
+            };
+          });
+        });
         setMessage("");
       } catch (error) {
         if (ignore) return;
         setMessage(error instanceof Error ? error.message : "FIFO 预览失败");
       }
     }
-    loadPreview();
+    void loadPreview();
     return () => {
       ignore = true;
     };
-  }, [open, quantity]);
+  }, [open, quantity, reloadToken]);
+
+  function updateFifoNote(
+    username: string,
+    patch: Partial<{ note: string; overwriteNote: boolean }>
+  ) {
+    setFifoNotes((entries) =>
+      entries.map((entry) =>
+        entry.username === username
+          ? {
+              ...entry,
+              ...(patch.note !== undefined
+                ? { note: patch.note, overwriteNote: false }
+                : {}),
+              ...(patch.overwriteNote !== undefined
+                ? { overwriteNote: patch.overwriteNote }
+                : {}),
+            }
+          : entry
+      )
+    );
+  }
 
   const handleOutbound = async (mode: "clipboard" | "txt") => {
-    if (clamped === 0) return;
+    if (clamped === 0 || busy) return;
+    setBusy(true);
     try {
-      const payload = await commitFifo(quantity);
+      const payload = await commitFifo(quantity, fifoNotes);
       if (payload.clipboardText) {
         if (mode === "clipboard") {
           await writeOutboundClipboardText(payload.clipboardText);
@@ -62,7 +116,6 @@ export function QuickOutboundModal({
           downloadTextFile(payload.clipboardText);
         }
       }
-      setMax(Math.max(0, payload.max - payload.quantity));
       setPreview([]);
       setCopied(mode === "clipboard");
       setSuccess(true);
@@ -72,9 +125,12 @@ export function QuickOutboundModal({
           : `已出库 ${payload.quantity} 条并下载 TXT`
       );
       setMessage("");
+      setReloadToken((token) => token + 1);
       setTimeout(() => setCopied(false), 2000);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "FIFO 出库失败");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -82,6 +138,7 @@ export function QuickOutboundModal({
     setSuccess(false);
     setSuccessMessage("");
     setQuantity(1);
+    setReloadToken((token) => token + 1);
   };
 
   const chips = Array.from(new Set([1, 5, 10, max].filter((n) => n > 0)));
@@ -95,6 +152,7 @@ export function QuickOutboundModal({
         setSuccessMessage("");
         setQuantity(1);
         setMessage("");
+        setReloadToken(0);
       }}
       title={success ? "出库成功" : "快捷 FIFO 出库"}
       description={
@@ -119,12 +177,15 @@ export function QuickOutboundModal({
             <Button
               variant="secondary"
               onClick={() => handleOutbound("txt")}
-              disabled={max === 0 || clamped === 0}
+              disabled={max === 0 || clamped === 0 || busy}
             >
               <Download className="h-4 w-4" />
               下载 TXT
             </Button>
-            <Button onClick={() => handleOutbound("clipboard")} disabled={max === 0 || clamped === 0}>
+            <Button
+              onClick={() => handleOutbound("clipboard")}
+              disabled={max === 0 || clamped === 0 || busy}
+            >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               出库并复制
             </Button>
@@ -139,7 +200,7 @@ export function QuickOutboundModal({
               variant="outline"
               size="icon"
               onClick={() => setQuantity((q) => Math.max(0, q - 1))}
-              disabled={clamped <= 0}
+              disabled={clamped <= 0 || busy}
             >
               <Minus className="h-4 w-4" />
             </Button>
@@ -155,7 +216,7 @@ export function QuickOutboundModal({
               variant="outline"
               size="icon"
               onClick={() => setQuantity((q) => Math.min(max, q + 1))}
-              disabled={clamped >= max}
+              disabled={clamped >= max || busy}
             >
               <Plus className="h-4 w-4" />
             </Button>
@@ -188,13 +249,54 @@ export function QuickOutboundModal({
             <p className="text-center text-sm text-red-600">{message}</p>
           )}
 
+          <BatchNoteControls
+            rows={fifoNotes.map((entry) => ({
+              clientId: entry.username,
+              username: entry.username,
+              note: entry.note,
+              overwriteNote: entry.overwriteNote,
+            }))}
+            onRowsChange={(rows) =>
+              setFifoNotes(
+                rows.map((row) => ({
+                  username: row.username ?? "",
+                  note: row.note,
+                  overwriteNote: row.overwriteNote,
+                }))
+              )
+            }
+            disabled={busy}
+          />
+
           <div className="rounded-xl border border-border bg-muted/30 p-3">
             <p className="mb-2 text-xs font-medium text-muted-foreground">FIFO 预览</p>
             <div className="space-y-1.5">
               {preview.slice(0, 3).map((a, i) => (
-                <div key={a.id} className="flex items-center gap-2 text-sm">
-                  {i === 0 && <Badge variant="fifo" className="text-[10px]">队首</Badge>}
-                  <span className="font-mono">{a.username}</span>
+                <div key={a.id} className="space-y-1 text-sm">
+                  <div className="flex items-center gap-2">
+                    {i === 0 && <Badge variant="fifo" className="text-[10px]">队首</Badge>}
+                    <span className="font-mono">{a.username}</span>
+                  </div>
+                  <OutboundNoteField
+                    existingNote={a.note}
+                    value={
+                      fifoNotesByUsername[a.username]?.note ?? a.note ?? ""
+                    }
+                    onChange={(note) =>
+                      updateFifoNote(a.username, {
+                        note,
+                        overwriteNote: false,
+                      })
+                    }
+                    overwriteNote={
+                      fifoNotesByUsername[a.username]?.overwriteNote ?? false
+                    }
+                    onOverwriteNoteChange={(overwriteNote) =>
+                      updateFifoNote(a.username, { overwriteNote })
+                    }
+                    disabled={busy}
+                    inputClassName="h-8 text-xs"
+                  />
                 </div>
               ))}
               {preview.length > 3 && (

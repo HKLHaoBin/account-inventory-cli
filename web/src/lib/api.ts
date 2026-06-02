@@ -4,6 +4,7 @@ import type {
   DatabaseListPayload,
   DashboardPayload,
   FifoCommitPayload,
+  FifoNoteEntry,
   FifoPreviewPayload,
   HistoryPayload,
   HistoryRecord,
@@ -154,14 +155,31 @@ export async function previewInbound(
   return payload.rows;
 }
 
+export type InboundCommitRow = Pick<
+  InboundPreviewRow,
+  "clientId" | "line" | "note" | "overwriteNote"
+>;
+
 export function commitInbound(
-  rows: Pick<InboundPreviewRow, "clientId" | "line">[],
+  rows: InboundCommitRow[],
   approvedPendingClientIds: string[]
 ): Promise<InboundCommitPayload> {
   return requestJson<InboundCommitPayload>("/api/inbound/commit", {
     method: "POST",
     body: JSON.stringify({ rows, approvedPendingClientIds }),
   });
+}
+
+export function fetchAccountNotes(
+  usernames: string[]
+): Promise<Record<string, string>> {
+  return requestJson<{ notes: Record<string, string> }>(
+    "/api/account-notes/lookup",
+    {
+      method: "POST",
+      body: JSON.stringify({ usernames }),
+    }
+  ).then((payload) => payload.notes);
 }
 
 export function previewFifo(quantity: number): Promise<FifoPreviewPayload> {
@@ -171,10 +189,13 @@ export function previewFifo(quantity: number): Promise<FifoPreviewPayload> {
   });
 }
 
-export function commitFifo(quantity: number): Promise<FifoCommitPayload> {
+export function commitFifo(
+  quantity: number,
+  notes: FifoNoteEntry[] = []
+): Promise<FifoCommitPayload> {
   return requestJson<FifoCommitPayload>("/api/outbound/fifo/commit", {
     method: "POST",
-    body: JSON.stringify({ quantity }),
+    body: JSON.stringify({ quantity, notes }),
   });
 }
 
@@ -240,16 +261,22 @@ export async function fetchUnifiedHistory(options?: {
 }
 
 export function outboundByUsername(
-  username: string
+  username: string,
+  options?: { note?: string | null; overwriteNote?: boolean }
 ): Promise<OutboundByUsernamePayload> {
   return requestJson<OutboundByUsernamePayload>("/api/outbound/by-username", {
     method: "POST",
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ username, ...options }),
   });
 }
 
+export type OutboundPasteCommitRow = Pick<
+  OutboundPasteRow,
+  "clientId" | "line" | "note" | "overwriteNote"
+>;
+
 export function commitOutboundPaste(
-  rows: Pick<OutboundPasteRow, "clientId" | "line">[]
+  rows: OutboundPasteCommitRow[]
 ): Promise<OutboundPasteCommitPayload> {
   return requestJson<OutboundPasteCommitPayload>("/api/outbound-paste/commit", {
     method: "POST",

@@ -18,6 +18,8 @@ import {
   searchAccounts,
   writeOutboundClipboardText,
 } from "@/lib/api";
+import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import { shouldResetTopbarNoteDraft } from "@/components/notes/note-overwrite-logic";
 import type { SearchResult } from "@/types/account";
 
 interface TopBarProps {
@@ -41,12 +43,15 @@ function highlightMatch(text: string, query: string) {
 export function TopBar({ onQuickOutbound }: TopBarProps) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
+  const topbarDraftKeyRef = useRef({ query: "", hitUsername: null as string | null });
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [outboundBusy, setOutboundBusy] = useState(false);
+  const [outboundNote, setOutboundNote] = useState("");
+  const [outboundOverwriteNote, setOutboundOverwriteNote] = useState(false);
 
   useEffect(() => {
     const q = query.trim();
@@ -93,6 +98,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
         setResults([]);
         setLoading(false);
         setSearchError("");
+        clearOutboundNoteDraft();
         setOpen(false);
         inputRef.current?.blur();
       }
@@ -109,6 +115,23 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
   const inventoryResults = results.filter((r) => r.source === "inventory");
   const historyResults = results.filter((r) => r.source === "history");
   const uniqueInventoryHit = inventoryResults.length === 1 && historyResults.length === 0;
+  const uniqueHitUsername = uniqueInventoryHit
+    ? inventoryResults[0]?.account.username ?? null
+    : null;
+
+  function clearOutboundNoteDraft() {
+    setOutboundNote("");
+    setOutboundOverwriteNote(false);
+  }
+
+  useEffect(() => {
+    const prev = topbarDraftKeyRef.current;
+    const next = { query, hitUsername: uniqueHitUsername };
+    if (shouldResetTopbarNoteDraft(prev, next)) {
+      clearOutboundNoteDraft();
+    }
+    topbarDraftKeyRef.current = next;
+  }, [query, uniqueHitUsername]);
 
   const handleUniqueOutbound = async () => {
     const hit = inventoryResults[0];
@@ -117,11 +140,21 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     setOutboundBusy(true);
     setSearchError("");
     try {
-      const payload = await outboundByUsername(hit.account.username);
+      const payload = await outboundByUsername(hit.account.username, {
+        note: outboundNote.trim() || undefined,
+        overwriteNote: outboundOverwriteNote,
+      });
       if (payload.clipboardText) {
         await writeOutboundClipboardText(payload.clipboardText);
       }
-      setResults([]);
+      const q = query.trim();
+      if (q) {
+        const updated = await searchAccounts(q);
+        setResults(updated);
+      } else {
+        setResults([]);
+      }
+      clearOutboundNoteDraft();
       setQuery("");
       setOpen(false);
     } catch (error) {
@@ -152,6 +185,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
               setResults([]);
               setLoading(false);
               setSearchError("");
+              clearOutboundNoteDraft();
             } else {
               setResults([]);
               setLoading(true);
@@ -171,6 +205,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
               setResults([]);
               setLoading(false);
               setSearchError("");
+              clearOutboundNoteDraft();
               setOpen(false);
             }}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
@@ -204,14 +239,25 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                       <button
                         key={r.id}
                         type="button"
-                        className="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm hover:bg-muted transition-colors"
+                        className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left text-sm hover:bg-muted transition-colors"
                         onClick={() => {
                           router.push(`/search?q=${encodeURIComponent(query)}`);
                           setOpen(false);
                         }}
                       >
-                        <span>{highlightMatch(r.account.username, query)}</span>
-                        <Badge variant="inventory">库存</Badge>
+                        <span className="min-w-0">
+                          <span className="block truncate">
+                            {highlightMatch(r.account.username, query)}
+                          </span>
+                          {r.account.note?.trim() && (
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {r.account.note}
+                            </span>
+                          )}
+                        </span>
+                        <Badge variant="inventory" className="shrink-0">
+                          库存
+                        </Badge>
                       </button>
                     ))}
                   </div>
@@ -225,20 +271,39 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                       <button
                         key={r.id}
                         type="button"
-                        className="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm hover:bg-muted transition-colors"
+                        className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left text-sm hover:bg-muted transition-colors"
                         onClick={() => {
                           router.push(`/search?q=${encodeURIComponent(query)}`);
                           setOpen(false);
                         }}
                       >
-                        <span>{highlightMatch(r.account.username, query)}</span>
-                        <Badge variant="history">历史</Badge>
+                        <span className="min-w-0">
+                          <span className="block truncate">
+                            {highlightMatch(r.account.username, query)}
+                          </span>
+                          {r.account.note?.trim() && (
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {r.account.note}
+                            </span>
+                          )}
+                        </span>
+                        <Badge variant="history" className="shrink-0">
+                          历史
+                        </Badge>
                       </button>
                     ))}
                   </div>
                 )}
                 {uniqueInventoryHit && (
-                  <div className="mt-2 border-t border-border p-2">
+                  <div className="mt-2 space-y-2 border-t border-border p-2">
+                    <OutboundNoteField
+                      existingNote={inventoryResults[0].account.note}
+                      value={outboundNote}
+                      onChange={setOutboundNote}
+                      overwriteNote={outboundOverwriteNote}
+                      onOverwriteNoteChange={setOutboundOverwriteNote}
+                      disabled={outboundBusy}
+                    />
                     <Button
                       className="w-full"
                       size="sm"

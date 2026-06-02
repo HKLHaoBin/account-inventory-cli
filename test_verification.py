@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -45,6 +46,7 @@ def _reset_inventory() -> None:
         conn.execute("DELETE FROM accounts")
         conn.execute("DELETE FROM outbound_records")
         conn.execute("DELETE FROM inbound_records")
+        conn.execute("DELETE FROM account_notes")
 
 
 def test_scenario_1_initial_inventory_zero() -> None:
@@ -1246,6 +1248,419 @@ def test_api_fifo_preview_and_commit() -> None:
     assert payload["clipboardText"] == "first----p1"
     assert not db.exists_in_inventory("first")
     assert db.exists_in_inventory("second")
+
+
+def test_account_notes_table_exists() -> None:
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'account_notes'"
+        ).fetchone()
+    assert row is not None
+
+
+def test_set_account_note_empty_skip() -> None:
+    _reset_inventory()
+    db.set_account_note("user_a", "keep")
+    assert db.set_account_note("user_a", "") == "keep"
+    assert db.set_account_note("user_a", None) == "keep"
+    assert db.get_account_notes(["user_a"])["user_a"] == "keep"
+
+
+def test_set_account_note_no_overwrite() -> None:
+    _reset_inventory()
+    db.set_account_note("user_b", "first")
+    assert db.set_account_note("user_b", "second") == "first"
+    assert db.get_account_notes(["user_b"])["user_b"] == "first"
+
+
+def test_set_account_note_overwrite() -> None:
+    _reset_inventory()
+    db.set_account_note("user_c", "first")
+    assert db.set_account_note("user_c", "second", overwrite=True) == "second"
+    assert db.set_account_note("user_c", "", overwrite=True) == ""
+
+
+def test_search_inventory_by_note() -> None:
+    _reset_inventory()
+    db.insert_account("note_user", "pw")
+    db.set_account_note("note_user", "VIP客户")
+    rows = db.search_inventory("VIP")
+    assert len(rows) == 1
+    assert rows[0]["username"] == "note_user"
+    assert rows[0]["note"] == "VIP客户"
+
+
+def test_search_outbound_history_by_note() -> None:
+    _reset_inventory()
+    db.insert_account("hist_note", "pw")
+    db.set_account_note("hist_note", "历史备注")
+    db.outbound_by_username("hist_note")
+    rows = db.search_outbound_history("历史备注")
+    assert len(rows) == 1
+    assert rows[0]["username"] == "hist_note"
+
+
+def test_list_inbound_history_by_note() -> None:
+    _reset_inventory()
+    db.insert_account("in_note", "pw")
+    db.set_account_note("in_note", "入库标签")
+    rows = db.list_inbound_history(query="入库标签")
+    assert len(rows) == 1
+    assert rows[0]["username"] == "in_note"
+    assert rows[0]["note"] == "入库标签"
+
+
+def test_list_outbound_history_by_note() -> None:
+    _reset_inventory()
+    db.insert_account("out_note", "pw")
+    db.set_account_note("out_note", "出库标签")
+    db.outbound_by_username("out_note")
+    rows = db.list_outbound_history(query="出库标签")
+    assert len(rows) == 1
+    assert rows[0]["username"] == "out_note"
+    assert rows[0]["note"] == "出库标签"
+
+
+def test_api_inbound_commit_with_note() -> None:
+    _reset_inventory()
+    client = _api_client()
+    response = client.post(
+        "/api/inbound/commit",
+        json={
+            "rows": [
+                {
+                    "clientId": "line-1",
+                    "line": "note_in----pw",
+                    "note": "客户A",
+                }
+            ],
+            "approvedPendingClientIds": [],
+        },
+    )
+    assert response.status_code == 200
+    row = response.json()["rows"][0]
+    assert row["status"] == "success"
+    assert row["note"] == "客户A"
+
+    inventory = client.get("/api/inventory").json()["records"]
+    assert inventory[0]["note"] == "客户A"
+
+    history = client.get("/api/inbound/history", params={"q": "客户A"}).json()["records"]
+    assert len(history) == 1
+    assert history[0]["note"] == "客户A"
+
+    search = client.get("/api/search", params={"q": "客户A"}).json()["results"]
+    assert len(search) == 1
+    assert search[0]["account"]["note"] == "客户A"
+
+
+def test_api_fifo_commit_with_note() -> None:
+    _reset_inventory()
+    db.insert_account("fifo_note", "pw")
+    db.set_account_note("fifo_note", "FIFO备注")
+    client = _api_client()
+
+    committed = client.post(
+        "/api/outbound/fifo/commit",
+        json={
+            "quantity": 1,
+            "notes": [
+                {
+                    "username": "fifo_note",
+                    "note": "出库后备注",
+                    "overwriteNote": True,
+                }
+            ],
+        },
+    )
+    assert committed.status_code == 200
+    assert not db.exists_in_inventory("fifo_note")
+
+    history = client.get("/api/outbound/history", params={"q": "出库后备注"}).json()[
+        "records"
+    ]
+    assert len(history) == 1
+    assert history[0]["note"] == "出库后备注"
+
+    search = client.get("/api/search", params={"q": "出库后备注"}).json()["results"]
+    assert len(search) == 1
+    assert search[0]["source"] == "history"
+
+
+def test_api_outbound_paste_with_note() -> None:
+    _reset_inventory()
+    db.insert_account("paste_note", "pw")
+    client = _api_client()
+    response = client.post(
+        "/api/outbound-paste/commit",
+        json={
+            "rows": [
+                {
+                    "clientId": "line-1",
+                    "line": "paste_note----pw",
+                    "note": "粘贴出库备注",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    row = response.json()["rows"][0]
+    assert row["status"] == "success"
+    assert row["note"] == "粘贴出库备注"
+    assert db.get_account_notes(["paste_note"])["paste_note"] == "粘贴出库备注"
+
+
+def test_api_note_no_overwrite_without_flag() -> None:
+    _reset_inventory()
+    db.set_account_note("keep_note", "原始备注")
+    client = _api_client()
+    response = client.post(
+        "/api/inbound/commit",
+        json={
+            "rows": [
+                {
+                    "clientId": "line-1",
+                    "line": "keep_note----pw2",
+                    "note": "新备注",
+                }
+            ],
+            "approvedPendingClientIds": [],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["rows"][0]["note"] == "原始备注"
+
+
+def test_api_note_overwrite_with_flag() -> None:
+    _reset_inventory()
+    db.set_account_note("overwrite_note", "旧备注")
+    client = _api_client()
+    response = client.post(
+        "/api/inbound/commit",
+        json={
+            "rows": [
+                {
+                    "clientId": "line-1",
+                    "line": "overwrite_note----pw2",
+                    "note": "新备注",
+                    "overwriteNote": True,
+                }
+            ],
+            "approvedPendingClientIds": [],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["rows"][0]["note"] == "新备注"
+
+
+def test_api_fifo_preview_new_head_after_commit() -> None:
+    _reset_inventory()
+    db.insert_account("head_a", "p1")
+    db.insert_account("head_b", "p2")
+    client = _api_client()
+
+    first_preview = client.post("/api/outbound/fifo/preview", json={"quantity": 1})
+    assert first_preview.status_code == 200
+    assert first_preview.json()["rows"][0]["username"] == "head_a"
+
+    committed = client.post("/api/outbound/fifo/commit", json={"quantity": 1})
+    assert committed.status_code == 200
+
+    second_preview = client.post("/api/outbound/fifo/preview", json={"quantity": 1})
+    assert second_preview.status_code == 200
+    assert second_preview.json()["rows"][0]["username"] == "head_b"
+
+
+def test_api_fifo_preview_reflects_database_switch() -> None:
+    _reset_inventory()
+    db.insert_account("default_head", "pw")
+    default = db.get_active_database_info()
+    client = _api_client()
+
+    default_preview = client.post("/api/outbound/fifo/preview", json={"quantity": 1})
+    assert default_preview.status_code == 200
+    assert default_preview.json()["rows"][0]["username"] == "default_head"
+
+    created = client.post("/api/databases", json={"name": "FIFO 切换库"})
+    assert created.status_code == 200
+    created_id = created.json()["id"]
+    db.insert_account("switched_head", "pw2")
+
+    switched_preview = client.post("/api/outbound/fifo/preview", json={"quantity": 1})
+    assert switched_preview.status_code == 200
+    assert switched_preview.json()["rows"][0]["username"] == "switched_head"
+
+    activated = client.post(f"/api/databases/{default['id']}/activate")
+    assert activated.status_code == 200
+
+    restored_preview = client.post("/api/outbound/fifo/preview", json={"quantity": 1})
+    assert restored_preview.status_code == 200
+    assert restored_preview.json()["rows"][0]["username"] == "default_head"
+
+    with mock.patch.dict("os.environ", {"UPDATE_ADMIN_TOKEN": "secret"}):
+        deleted = client.delete(
+            f"/api/databases/{created_id}",
+            headers={"X-Update-Token": "secret"},
+        )
+        assert deleted.status_code == 200
+
+
+def test_api_fifo_commit_multiple_notes() -> None:
+    _reset_inventory()
+    for index in range(5):
+        db.insert_account(f"multi_{index}", f"pw{index}")
+    client = _api_client()
+
+    preview = client.post("/api/outbound/fifo/preview", json={"quantity": 5})
+    assert preview.status_code == 200
+    rows = preview.json()["rows"]
+    assert len(rows) == 5
+
+    notes = [
+        {
+            "username": row["username"],
+            "note": f"批量备注-{index}",
+            "overwriteNote": True,
+        }
+        for index, row in enumerate(rows)
+    ]
+    committed = client.post(
+        "/api/outbound/fifo/commit",
+        json={"quantity": 5, "notes": notes},
+    )
+    assert committed.status_code == 200
+    assert committed.json()["quantity"] == 5
+
+    history = client.get("/api/outbound/history", params={"q": "批量备注-0"}).json()[
+        "records"
+    ]
+    assert len(history) == 1
+    assert history[0]["username"] == "multi_0"
+    assert history[0]["note"] == "批量备注-0"
+
+    history_last = client.get(
+        "/api/outbound/history", params={"q": "批量备注-4"}
+    ).json()["records"]
+    assert len(history_last) == 1
+    assert history_last[0]["username"] == "multi_4"
+    assert history_last[0]["note"] == "批量备注-4"
+
+
+def test_api_outbound_by_username_with_note_searchable() -> None:
+    _reset_inventory()
+    db.insert_account("search_out", "pw")
+    db.set_account_note("search_out", "原始备注")
+    client = _api_client()
+
+    response = client.post(
+        "/api/outbound/by-username",
+        json={
+            "username": "search_out",
+            "note": "搜索出库备注",
+            "overwriteNote": True,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["account"]["note"] == "搜索出库备注"
+
+    history = client.get("/api/outbound/history", params={"q": "搜索出库备注"}).json()[
+        "records"
+    ]
+    assert len(history) == 1
+    assert history[0]["username"] == "search_out"
+    assert history[0]["note"] == "搜索出库备注"
+
+    search = client.get("/api/search", params={"q": "搜索出库备注"}).json()["results"]
+    assert len(search) == 1
+    assert search[0]["source"] == "history"
+    assert search[0]["account"]["note"] == "搜索出库备注"
+
+
+def test_api_outbound_by_username_note_without_overwrite() -> None:
+    _reset_inventory()
+    db.insert_account("keep_out", "pw")
+    db.set_account_note("keep_out", "保留备注")
+    client = _api_client()
+
+    response = client.post(
+        "/api/outbound/by-username",
+        json={"username": "keep_out", "note": "新备注"},
+    )
+    assert response.status_code == 200
+    assert response.json()["account"]["note"] == "保留备注"
+
+    history = client.get("/api/outbound/history", params={"q": "保留备注"}).json()[
+        "records"
+    ]
+    assert len(history) == 1
+    assert history[0]["note"] == "保留备注"
+
+
+def _normalize_note(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def _notes_differ(existing: str | None, new: str | None) -> bool:
+    existing_norm = _normalize_note(existing)
+    draft = _normalize_note(new)
+    if not existing_norm or not draft:
+        return False
+    return existing_norm != draft
+
+
+def _effective_overwrite_for_commit(
+    existing: str | None, new: str | None, overwrite: bool
+) -> bool:
+    if not _notes_differ(existing, new):
+        return False
+    return overwrite
+
+
+def _should_reset_topbar_draft(
+    prev_query: str,
+    prev_hit: str | None,
+    next_query: str,
+    next_hit: str | None,
+) -> bool:
+    if not _normalize_note(next_query):
+        return True
+    if _normalize_note(prev_query) != _normalize_note(next_query):
+        return True
+    if prev_hit != next_hit:
+        return True
+    return False
+
+
+def test_note_overwrite_logic_mirror() -> None:
+    assert not _notes_differ(None, "new")
+    assert not _notes_differ("same", "same")
+    assert _notes_differ("old", "new")
+    assert not _effective_overwrite_for_commit("old", "new", False)
+    assert _effective_overwrite_for_commit("old", "new", True)
+    assert not _effective_overwrite_for_commit("same", "same", True)
+    assert _should_reset_topbar_draft("user", "alice", "user", "bob")
+    assert not _should_reset_topbar_draft("user", "alice", "user", "alice")
+    assert _should_reset_topbar_draft("alice", "alice", "", None)
+
+
+def test_web_note_overwrite_vitest() -> None:
+    web_dir = ROOT / "web"
+    if not (web_dir / "package.json").is_file():
+        raise AssertionError("web/package.json missing")
+    result = subprocess.run(
+        ["npm", "run", "test"],
+        cwd=web_dir,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "web vitest failed:\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
 
 
 def test_api_search_inventory_and_history() -> None:
@@ -2568,6 +2983,26 @@ def run_all() -> tuple[int, list[str]]:
         ("api separator rules", test_api_separator_rules),
         ("api inbound commit", test_api_inbound_commit),
         ("api fifo preview and commit", test_api_fifo_preview_and_commit),
+        ("account notes table exists", test_account_notes_table_exists),
+        ("set account note empty skip", test_set_account_note_empty_skip),
+        ("set account note no overwrite", test_set_account_note_no_overwrite),
+        ("set account note overwrite", test_set_account_note_overwrite),
+        ("search inventory by note", test_search_inventory_by_note),
+        ("search outbound history by note", test_search_outbound_history_by_note),
+        ("list inbound history by note", test_list_inbound_history_by_note),
+        ("list outbound history by note", test_list_outbound_history_by_note),
+        ("api inbound commit with note", test_api_inbound_commit_with_note),
+        ("api fifo commit with note", test_api_fifo_commit_with_note),
+        ("api outbound paste with note", test_api_outbound_paste_with_note),
+        ("api note no overwrite without flag", test_api_note_no_overwrite_without_flag),
+        ("api note overwrite with flag", test_api_note_overwrite_with_flag),
+        ("api fifo preview new head after commit", test_api_fifo_preview_new_head_after_commit),
+        ("api fifo preview reflects database switch", test_api_fifo_preview_reflects_database_switch),
+        ("api fifo commit multiple notes", test_api_fifo_commit_multiple_notes),
+        ("api outbound by username with note searchable", test_api_outbound_by_username_with_note_searchable),
+        ("api outbound by username note without overwrite", test_api_outbound_by_username_note_without_overwrite),
+        ("note overwrite logic mirror", test_note_overwrite_logic_mirror),
+        ("web note overwrite vitest", test_web_note_overwrite_vitest),
         ("api search inventory and history", test_api_search_inventory_and_history),
         ("api inventory empty", test_api_inventory_empty),
         ("api inventory ordered", test_api_inventory_real_records_ordered),

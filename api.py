@@ -44,6 +44,7 @@ class AccountPayload(BaseModel):
     emailPassword: str | None = None
     url: str | None = None
     inboundAt: str
+    note: str | None = None
 
 
 class OutboundRecordPayload(BaseModel):
@@ -56,6 +57,7 @@ class OutboundRecordPayload(BaseModel):
     inboundAt: str | None = None
     inboundRecordId: str | None = None
     outboundAt: str
+    note: str | None = None
 
 
 class InboundRecordPayload(BaseModel):
@@ -66,6 +68,7 @@ class InboundRecordPayload(BaseModel):
     emailPassword: str | None = None
     url: str | None = None
     inboundAt: str
+    note: str | None = None
 
 
 class HistoryRecordPayload(BaseModel):
@@ -79,6 +82,7 @@ class HistoryRecordPayload(BaseModel):
     inboundAt: str | None = None
     outboundAt: str | None = None
     timestamp: str
+    note: str | None = None
 
 
 class InboundHistoryPayload(BaseModel):
@@ -177,6 +181,7 @@ class InboundPreviewRow(BaseModel):
     category: InboundCategory
     reason: str | None = None
     lastOutboundAt: str | None = None
+    note: str | None = None
 
 
 class InboundPreviewPayload(BaseModel):
@@ -186,6 +191,8 @@ class InboundPreviewPayload(BaseModel):
 class InboundCommitLine(BaseModel):
     clientId: str
     line: str
+    note: str | None = None
+    overwriteNote: bool = False
 
 
 class InboundCommitRequest(BaseModel):
@@ -208,6 +215,8 @@ class InboundCommitPayload(BaseModel):
 class OutboundPasteCommitLine(BaseModel):
     clientId: str
     line: str
+    note: str | None = None
+    overwriteNote: bool = False
 
 
 class OutboundPasteCommitRequest(BaseModel):
@@ -225,6 +234,7 @@ class OutboundPasteResultRow(BaseModel):
     category: OutboundCategory
     status: Literal["success", "error"]
     message: str
+    note: str | None = None
 
 
 class OutboundPasteCommitPayload(BaseModel):
@@ -238,8 +248,29 @@ class FifoQuantityRequest(BaseModel):
     quantity: int = 1
 
 
+class FifoNoteEntry(BaseModel):
+    username: str
+    note: str | None = None
+    overwriteNote: bool = False
+
+
+class FifoCommitRequest(BaseModel):
+    quantity: int = 1
+    notes: list[FifoNoteEntry] = Field(default_factory=list)
+
+
+class AccountNotesLookupRequest(BaseModel):
+    usernames: list[str] = Field(default_factory=list)
+
+
+class AccountNotesLookupPayload(BaseModel):
+    notes: dict[str, str]
+
+
 class OutboundByUsernameRequest(BaseModel):
     username: str
+    note: str | None = None
+    overwriteNote: bool = False
 
 
 class FifoPreviewPayload(BaseModel):
@@ -302,6 +333,7 @@ def _account_payload(row: dict) -> AccountPayload:
         emailPassword=row["email_password"],
         url=row["url"],
         inboundAt=row["created_at"],
+        note=row.get("note") or "",
     )
 
 
@@ -324,6 +356,7 @@ def _outbound_record_payload(row: dict) -> OutboundRecordPayload:
         inboundAt=inbound_at,
         inboundRecordId=inbound_record_id,
         outboundAt=row["outbound_at"],
+        note=row.get("note") or "",
     )
 
 
@@ -336,6 +369,7 @@ def _inbound_record_payload(row: dict) -> InboundRecordPayload:
         emailPassword=row["email_password"],
         url=row["url"],
         inboundAt=row["inbound_at"],
+        note=row.get("note") or "",
     )
 
 
@@ -356,12 +390,13 @@ def _history_record_payload(row: dict) -> HistoryRecordPayload:
         inboundAt=inbound_at,
         outboundAt=row.get("outbound_at"),
         timestamp=row["timestamp"],
+        note=row.get("note") or "",
     )
 
 
 def _matched_field(row: dict, query: str) -> str:
     q = query.casefold()
-    for key in ("username", "password", "email", "email_password", "url"):
+    for key in ("username", "password", "email", "email_password", "url", "note"):
         value = row.get(key)
         if value and q in str(value).casefold():
             return str(value)
@@ -390,6 +425,7 @@ def _outbound_paste_result_payload(row: dict) -> OutboundPasteResultRow:
         category=row["category"],
         status=row["status"],
         message=row["message"],
+        note=row.get("note") or "",
     )
 
 
@@ -827,6 +863,11 @@ def commit_inbound(payload: InboundCommitRequest) -> InboundCommitPayload:
             continue
 
         inventory_exists.add(username)
+        final_note = db.set_account_note(
+            username,
+            item.note,
+            overwrite=item.overwriteNote,
+        )
         results.append(
             InboundCommitResultRow(
                 **base,
@@ -834,6 +875,7 @@ def commit_inbound(payload: InboundCommitRequest) -> InboundCommitPayload:
                 lastOutboundAt=outbound_times.get(username) if is_pending else None,
                 status="success",
                 message="入库成功",
+                note=final_note,
             )
         )
 
@@ -856,14 +898,38 @@ def preview_fifo(payload: FifoQuantityRequest) -> FifoPreviewPayload:
     )
 
 
+@app.post("/api/account-notes/lookup", response_model=AccountNotesLookupPayload)
+def lookup_account_notes(
+    payload: AccountNotesLookupRequest,
+) -> AccountNotesLookupPayload:
+    return AccountNotesLookupPayload(notes=db.get_account_notes(payload.usernames))
+
+
 @app.post("/api/outbound/fifo/commit", response_model=FifoCommitPayload)
-def commit_fifo(payload: FifoQuantityRequest) -> FifoCommitPayload:
+def commit_fifo(payload: FifoCommitRequest) -> FifoCommitPayload:
     global _ignored_clipboard_text
 
     max_count = db.count_inventory()
     quantity = min(max(payload.quantity, 0), max_count)
     records = db.outbound_oldest_many(quantity)
-    rows = [_account_payload({**record, "id": index + 1}) for index, record in enumerate(records)]
+    note_by_username = {
+        entry.username.strip(): entry
+        for entry in payload.notes
+        if entry.username.strip()
+    }
+    for record in records:
+        entry = note_by_username.get(record["username"])
+        if entry is None:
+            continue
+        record["note"] = db.set_account_note(
+            record["username"],
+            entry.note,
+            overwrite=entry.overwriteNote,
+        )
+    rows = [
+        _account_payload({**record, "id": index + 1, "created_at": record["created_at"]})
+        for index, record in enumerate(records)
+    ]
     clipboard_text = "\n".join(
         format_account(
             record["username"],
@@ -942,10 +1008,23 @@ def commit_outbound_paste(
             }
         )
 
-    committed = {
-        row["client_id"]: _outbound_paste_result_payload(row)
-        for row in db.commit_outbound_paste_rows(parsed_rows)
+    note_by_client_id = {
+        item.clientId: item for item in payload.rows if item.clientId
     }
+    committed_rows = db.commit_outbound_paste_rows(parsed_rows)
+    committed: dict[str, OutboundPasteResultRow] = {}
+    for row in committed_rows:
+        if row["status"] != "success":
+            committed[row["client_id"]] = _outbound_paste_result_payload(row)
+            continue
+        item = note_by_client_id.get(row["client_id"])
+        final_note = db.set_account_note(
+            row["username"],
+            item.note if item is not None else None,
+            overwrite=item.overwriteNote if item is not None else False,
+        )
+        row["note"] = final_note
+        committed[row["client_id"]] = _outbound_paste_result_payload(row)
 
     results: list[OutboundPasteResultRow] = []
     for item in payload.rows:
@@ -987,10 +1066,16 @@ def commit_outbound_by_username(
     if record is None:
         raise HTTPException(status_code=404, detail="账号不在库存中，无法出库")
 
+    final_note = db.set_account_note(
+        username,
+        payload.note,
+        overwrite=payload.overwriteNote,
+    )
+    record["note"] = final_note
     clipboard_text = _format_account_row(record)
     _ignored_clipboard_text = clipboard_text or None
     return OutboundByUsernamePayload(
-        account=_account_payload({**record, "id": username}),
+        account=_account_payload({**record, "id": username, "created_at": record["created_at"]}),
         clipboardText=clipboard_text,
     )
 

@@ -310,6 +310,81 @@ def _escape_like(substring: str) -> str:
     return substring.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _migrate_account_notes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_notes (
+            username TEXT PRIMARY KEY,
+            note TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+        """
+    )
+
+
+def _note_from_row(row: sqlite3.Row) -> str:
+    if "note" not in row.keys():
+        return ""
+    value = row["note"]
+    return "" if value is None else str(value)
+
+
+def set_account_note(username: str, note: str | None, *, overwrite: bool = False) -> str:
+    username = username.strip()
+    if not username:
+        return ""
+    if note is None:
+        return get_account_notes([username]).get(username, "")
+
+    new_note = note.strip()
+    if not new_note and not overwrite:
+        return get_account_notes([username]).get(username, "")
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT note FROM account_notes WHERE username = ?",
+            (username,),
+        ).fetchone()
+        current = "" if row is None else str(row["note"] or "")
+        if current.strip() and not overwrite:
+            return current
+
+        value_to_store = note.strip() if overwrite else new_note
+        conn.execute(
+            """
+            INSERT INTO account_notes (username, note, updated_at)
+            VALUES (?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(username) DO UPDATE SET
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (username, value_to_store),
+        )
+        return value_to_store
+
+
+def get_account_notes(usernames: list[str]) -> dict[str, str]:
+    normalized = [name.strip() for name in usernames if name and name.strip()]
+    if not normalized:
+        return {}
+
+    placeholders = ",".join("?" * len(normalized))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT username, note
+            FROM account_notes
+            WHERE username IN ({placeholders})
+            """,
+            normalized,
+        ).fetchall()
+
+    notes = {name: "" for name in normalized}
+    for row in rows:
+        notes[str(row["username"])] = str(row["note"] or "")
+    return notes
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -338,6 +413,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_add_url_column(conn)
     _migrate_inbound_history(conn)
     _migrate_separator_rules(conn)
+    _migrate_account_notes(conn)
 
 
 def _init_database_file(record: dict[str, Any]) -> None:
@@ -669,6 +745,7 @@ def _row_to_account_dict(row: sqlite3.Row) -> dict[str, Any]:
         "email": row["email"],
         "email_password": row["email_password"],
         "url": row["url"],
+        "note": _note_from_row(row),
     }
 
 
@@ -687,24 +764,28 @@ def _search_table(
         rows = conn.execute(
             f"""
             SELECT {columns}
-            FROM {table}
-            WHERE username LIKE ? ESCAPE '\\'
-               OR password LIKE ? ESCAPE '\\'
-               OR email LIKE ? ESCAPE '\\'
-               OR email_password LIKE ? ESCAPE '\\'
-               OR url LIKE ? ESCAPE '\\'
+            FROM {table} AS t
+            LEFT JOIN account_notes AS an ON an.username = t.username
+            WHERE t.username LIKE ? ESCAPE '\\'
+               OR t.password LIKE ? ESCAPE '\\'
+               OR t.email LIKE ? ESCAPE '\\'
+               OR t.email_password LIKE ? ESCAPE '\\'
+               OR t.url LIKE ? ESCAPE '\\'
+               OR an.note LIKE ? ESCAPE '\\'
             ORDER BY {order_by}
             """,
-            (pattern, pattern, pattern, pattern, pattern),
+            (pattern, pattern, pattern, pattern, pattern, pattern),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
 def list_inventory(limit: int | None = None) -> list[dict[str, Any]]:
     sql = """
-        SELECT id, username, password, email, email_password, url, created_at
-        FROM accounts
-        ORDER BY created_at ASC, id ASC
+        SELECT a.id, a.username, a.password, a.email, a.email_password, a.url,
+               a.created_at, COALESCE(an.note, '') AS note
+        FROM accounts AS a
+        LEFT JOIN account_notes AS an ON an.username = a.username
+        ORDER BY a.created_at ASC, a.id ASC
     """
     params: tuple[Any, ...] = ()
     if limit is not None:
@@ -761,6 +842,7 @@ def _row_to_inbound_dict(row: sqlite3.Row) -> dict[str, Any]:
         "email_password": row["email_password"],
         "url": row["url"],
         "inbound_at": row["inbound_at"],
+        "note": _note_from_row(row),
     }
 
 
@@ -768,34 +850,38 @@ def _history_text_clause(
     query: str,
     *,
     include_url: bool = True,
+    table_alias: str = "",
 ) -> tuple[str, list[str]]:
     if not query:
         return "", []
 
+    prefix = f"{table_alias}." if table_alias else ""
     pattern = f"%{_escape_like(query)}%"
     if include_url:
         return (
-            """
+            f"""
             (
-                username LIKE ? ESCAPE '\\'
-                OR password LIKE ? ESCAPE '\\'
-                OR email LIKE ? ESCAPE '\\'
-                OR email_password LIKE ? ESCAPE '\\'
-                OR url LIKE ? ESCAPE '\\'
+                {prefix}username LIKE ? ESCAPE '\\'
+                OR {prefix}password LIKE ? ESCAPE '\\'
+                OR {prefix}email LIKE ? ESCAPE '\\'
+                OR {prefix}email_password LIKE ? ESCAPE '\\'
+                OR {prefix}url LIKE ? ESCAPE '\\'
+                OR an.note LIKE ? ESCAPE '\\'
             )
             """,
-            [pattern, pattern, pattern, pattern, pattern],
+            [pattern, pattern, pattern, pattern, pattern, pattern],
         )
     return (
-        """
+        f"""
         (
-            username LIKE ? ESCAPE '\\'
-            OR password LIKE ? ESCAPE '\\'
-            OR email LIKE ? ESCAPE '\\'
-            OR email_password LIKE ? ESCAPE '\\'
+            {prefix}username LIKE ? ESCAPE '\\'
+            OR {prefix}password LIKE ? ESCAPE '\\'
+            OR {prefix}email LIKE ? ESCAPE '\\'
+            OR {prefix}email_password LIKE ? ESCAPE '\\'
+            OR an.note LIKE ? ESCAPE '\\'
         )
         """,
-        [pattern, pattern, pattern, pattern],
+        [pattern, pattern, pattern, pattern, pattern],
     )
 
 
@@ -823,13 +909,18 @@ def _build_history_where(
     range_tokens: list[str] | None,
     timestamp_column: str,
     include_url: bool = True,
+    table_alias: str = "",
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
 
     ranges, text_query = _collect_history_ranges(query, range_tokens)
 
-    text_clause, text_params = _history_text_clause(text_query, include_url=include_url)
+    text_clause, text_params = _history_text_clause(
+        text_query,
+        include_url=include_url,
+        table_alias=table_alias,
+    )
     if text_clause:
         clauses.append(text_clause)
         params.extend(text_params)
@@ -853,13 +944,16 @@ def list_inbound_history(
     where_sql, params = _build_history_where(
         query=query,
         range_tokens=range_tokens,
-        timestamp_column="inbound_at",
+        timestamp_column="ir.inbound_at",
+        table_alias="ir",
     )
     sql = f"""
-        SELECT id, username, password, email, email_password, url, inbound_at
-        FROM inbound_records
+        SELECT ir.id, ir.username, ir.password, ir.email, ir.email_password, ir.url,
+               ir.inbound_at, COALESCE(an.note, '') AS note
+        FROM inbound_records AS ir
+        LEFT JOIN account_notes AS an ON an.username = ir.username
         {where_sql}
-        ORDER BY inbound_at DESC, id DESC
+        ORDER BY ir.inbound_at DESC, ir.id DESC
     """
     if limit is not None:
         sql += " LIMIT ?"
@@ -879,14 +973,17 @@ def list_outbound_history(
     where_sql, params = _build_history_where(
         query=query,
         range_tokens=range_tokens,
-        timestamp_column="outbound_at",
+        timestamp_column="ob.outbound_at",
+        table_alias="ob",
     )
     sql = f"""
-        SELECT id, username, password, email, email_password, url,
-               inbound_at, outbound_at, inbound_record_id
-        FROM outbound_records
+        SELECT ob.id, ob.username, ob.password, ob.email, ob.email_password, ob.url,
+               ob.inbound_at, ob.outbound_at, ob.inbound_record_id,
+               COALESCE(an.note, '') AS note
+        FROM outbound_records AS ob
+        LEFT JOIN account_notes AS an ON an.username = ob.username
         {where_sql}
-        ORDER BY outbound_at DESC, id DESC
+        ORDER BY ob.outbound_at DESC, ob.id DESC
     """
     if limit is not None:
         sql += " LIMIT ?"
@@ -971,8 +1068,11 @@ def search_inventory(substring: str) -> list[dict[str, Any]]:
     rows = _search_table(
         "accounts",
         substring,
-        columns="id, username, password, email, email_password, url, created_at",
-        order_by="created_at ASC, id ASC",
+        columns=(
+            "t.id, t.username, t.password, t.email, t.email_password, t.url, "
+            "t.created_at, COALESCE(an.note, '') AS note"
+        ),
+        order_by="t.created_at ASC, t.id ASC",
     )
     return [
         {
@@ -988,10 +1088,11 @@ def search_outbound_history(substring: str) -> list[dict[str, Any]]:
         "outbound_records",
         substring,
         columns=(
-            "id, username, password, email, email_password, url, "
-            "inbound_at, outbound_at, inbound_record_id"
+            "t.id, t.username, t.password, t.email, t.email_password, t.url, "
+            "t.inbound_at, t.outbound_at, t.inbound_record_id, "
+            "COALESCE(an.note, '') AS note"
         ),
-        order_by="outbound_at DESC, id DESC",
+        order_by="t.outbound_at DESC, t.id DESC",
     )
     return [
         {
@@ -1010,10 +1111,11 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, username, password, email, email_password, url,
-                   created_at, inbound_record_id
-            FROM accounts
-            ORDER BY created_at ASC, id ASC
+            SELECT a.id, a.username, a.password, a.email, a.email_password, a.url,
+                   a.created_at, a.inbound_record_id, COALESCE(an.note, '') AS note
+            FROM accounts AS a
+            LEFT JOIN account_notes AS an ON an.username = a.username
+            ORDER BY a.created_at ASC, a.id ASC
             LIMIT ?
             """,
             (count,),
@@ -1049,6 +1151,7 @@ def outbound_oldest_many(count: int) -> list[dict[str, Any]]:
                     "email_password": row["email_password"],
                     "url": row["url"],
                     "created_at": row["created_at"],
+                    "note": _note_from_row(row),
                 }
             )
 

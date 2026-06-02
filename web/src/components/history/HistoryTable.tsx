@@ -127,6 +127,7 @@ export function HistoryTable({
                       {(mode === "outbound" || mode === "all") && (
                         <th className="px-4 py-3 text-left font-medium">出库时间</th>
                       )}
+                      <th className="px-4 py-3 text-left font-medium">备注</th>
                       <th className="px-4 py-3 text-left font-medium">操作</th>
                     </tr>
                   </thead>
@@ -179,6 +180,9 @@ export function HistoryTable({
                               )}
                             </td>
                           )}
+                          <td className="max-w-[200px] truncate px-4 py-3 text-xs text-muted-foreground">
+                            {record.note?.trim() ? record.note : "—"}
+                          </td>
                           <td className="px-4 py-3">
                             <Button
                               variant="ghost"

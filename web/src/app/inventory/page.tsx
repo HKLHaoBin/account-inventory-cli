@@ -91,7 +91,8 @@ export default function InventoryPage() {
       items = items.filter(
         (a) =>
           a.username.toLowerCase().includes(q) ||
-          a.email?.toLowerCase().includes(q)
+          a.email?.toLowerCase().includes(q) ||
+          a.note?.toLowerCase().includes(q)
       );
     }
     items.sort((a, b) => {
@@ -305,6 +306,7 @@ export default function InventoryPage() {
                     <th className="px-4 py-3 text-left font-medium">邮箱</th>
                     <th className="px-4 py-3 text-left font-medium">邮箱密码</th>
                     <th className="px-4 py-3 text-left font-medium">网址</th>
+                    <th className="px-4 py-3 text-left font-medium">备注</th>
                     <th className="px-4 py-3 text-left font-medium">入库时间</th>
                     <th className="px-4 py-3 text-left font-medium">操作</th>
                   </tr>
@@ -383,6 +385,14 @@ export default function InventoryPage() {
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
+                        </td>
+                        <td
+                          className={cn(
+                            "px-4 max-w-[160px] truncate text-xs text-muted-foreground",
+                            rowPadding
+                          )}
+                        >
+                          {account.note?.trim() ? account.note : "—"}
                         </td>
                         <td
                           className={cn(

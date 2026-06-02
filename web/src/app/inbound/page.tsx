@@ -12,7 +12,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/input";
+import { BatchNoteControls } from "@/components/notes/batch-note-controls";
+import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { commitInbound, writeAppClipboardText } from "@/lib/api";
+import { useAccountNotesLookup } from "@/lib/use-account-notes-lookup";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { useSeparatorRules } from "@/lib/use-separator-rules";
@@ -212,6 +215,17 @@ export default function InboundPage() {
     setDraftRows(buildDraftRows(textRef.current, enabledSeparators));
   }, [enabledSeparators, rulesReady]);
 
+  useAccountNotesLookup(draftRows, setDraftRows, rulesReady);
+
+  function updateDraftRow(
+    clientId: string,
+    patch: Partial<InboundPreviewRow>
+  ) {
+    setDraftRows((rows) =>
+      rows.map((row) => (row.clientId === clientId ? { ...row, ...patch } : row))
+    );
+  }
+
   const displayedRows = useMemo(
     () =>
       draftRows
@@ -239,7 +253,12 @@ export default function InboundPage() {
 
   const commitRows = displayedRows
     .filter((row) => canCommitRow(row, approvedPendingIds))
-    .map((row) => ({ clientId: row.clientId, line: row.line }));
+    .map((row) => ({
+      clientId: row.clientId,
+      line: row.line,
+      note: row.note,
+      overwriteNote: row.overwriteNote,
+    }));
   const approvedCount = commitRows.length;
 
   async function handleConfirm() {
@@ -333,6 +352,12 @@ export default function InboundPage() {
             ))}
           </div>
 
+          <BatchNoteControls
+            rows={draftRows}
+            onRowsChange={setDraftRows}
+            disabled={busy || rulesLoading || !!rulesError}
+          />
+
           <div className="overflow-x-auto rounded-xl border border-border">
             <table className="w-full text-sm">
               <thead>
@@ -343,6 +368,7 @@ export default function InboundPage() {
                   <th className="px-3 py-2.5 text-left font-medium">密码</th>
                   <th className="px-3 py-2.5 text-left font-medium">邮箱</th>
                   <th className="px-3 py-2.5 text-left font-medium">网址</th>
+                  <th className="px-3 py-2.5 text-left font-medium">备注</th>
                   <th className="px-3 py-2.5 text-left font-medium">信息</th>
                   <th className="w-12 px-3 py-2.5 text-left font-medium">操作</th>
                 </tr>
@@ -350,7 +376,7 @@ export default function InboundPage() {
               <tbody>
                 {displayedRows.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
                       输入账号文本后会转换为表格
                     </td>
                   </tr>
@@ -397,6 +423,26 @@ export default function InboundPage() {
                         </td>
                         <td className="max-w-[220px] truncate px-3 py-2.5 font-mono text-xs">
                           {row.url ?? "-"}
+                        </td>
+                        <td className="min-w-[140px] px-3 py-2.5">
+                          <OutboundNoteField
+                            existingNote={row.existingAccountNote}
+                            value={row.note ?? ""}
+                            onChange={(note) =>
+                              updateDraftRow(row.clientId, {
+                                note,
+                                overwriteNote: false,
+                              })
+                            }
+                            overwriteNote={row.overwriteNote ?? false}
+                            onOverwriteNoteChange={(overwriteNote) =>
+                              updateDraftRow(row.clientId, { overwriteNote })
+                            }
+                            disabled={
+                              isCommitResult(row) && row.status === "success"
+                            }
+                            inputClassName="h-8 text-xs"
+                          />
                         </td>
                         <td className="px-3 py-2.5 text-xs text-muted-foreground">
                           {displayMessage(row)}
