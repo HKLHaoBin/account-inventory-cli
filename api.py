@@ -83,8 +83,26 @@ class StatsPayload(BaseModel):
     pendingCount: int = 0
 
 
+class DatabaseInfoPayload(BaseModel):
+    id: str
+    name: str
+    fileName: str
+    path: str
+    createdAt: str
+    active: bool
+    inventoryCount: int
+    todayInbound: int
+    todayOutbound: int
+
+
+class DatabaseListPayload(BaseModel):
+    databases: list[DatabaseInfoPayload]
+    activeDatabaseId: str
+
+
 class DashboardPayload(BaseModel):
     stats: StatsPayload
+    database: DatabaseInfoPayload
     fifoPreview: list[AccountPayload]
     recentActivities: list[ActivityPayload]
 
@@ -95,6 +113,18 @@ class InboundPreviewRequest(BaseModel):
 
 class ClipboardIgnoreRequest(BaseModel):
     text: str = ""
+
+
+class CreateDatabaseRequest(BaseModel):
+    name: str = ""
+
+
+class CloneDatabaseRequest(BaseModel):
+    name: str = ""
+
+
+class RenameDatabaseRequest(BaseModel):
+    name: str = ""
 
 
 class InboundPreviewRow(BaseModel):
@@ -247,6 +277,20 @@ def _outbound_paste_result_payload(row: dict) -> OutboundPasteResultRow:
     )
 
 
+def _database_payload(row: dict) -> DatabaseInfoPayload:
+    return DatabaseInfoPayload(
+        id=str(row["id"]),
+        name=row["name"],
+        fileName=row["file_name"],
+        path=row["path"],
+        createdAt=row["created_at"],
+        active=bool(row["active"]),
+        inventoryCount=int(row["inventory_count"]),
+        todayInbound=int(row["today_inbound"]),
+        todayOutbound=int(row["today_outbound"]),
+    )
+
+
 def _parse_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
@@ -340,12 +384,70 @@ def get_dashboard() -> DashboardPayload:
             todayOutbound=db.count_today_outbound(),
             pendingCount=0,
         ),
+        database=_database_payload(db.get_active_database_info()),
         fifoPreview=[_account_payload(row) for row in db.fifo_preview_many(5)],
         recentActivities=[
             ActivityPayload(**activity)
             for activity in db.list_recent_activities(limit=10)
         ],
     )
+
+
+@app.get("/api/databases", response_model=DatabaseListPayload)
+def get_databases() -> DatabaseListPayload:
+    databases = [_database_payload(row) for row in db.list_database_info()]
+    active = next((item.id for item in databases if item.active), "")
+    return DatabaseListPayload(databases=databases, activeDatabaseId=active)
+
+
+@app.post("/api/databases", response_model=DatabaseInfoPayload)
+def create_database(payload: CreateDatabaseRequest) -> DatabaseInfoPayload:
+    try:
+        return _database_payload(db.create_database(payload.name))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/databases/{database_id}/clone", response_model=DatabaseInfoPayload)
+def clone_database(
+    database_id: str,
+    payload: CloneDatabaseRequest,
+) -> DatabaseInfoPayload:
+    try:
+        return _database_payload(db.clone_database(database_id, payload.name))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/databases/{database_id}/activate", response_model=DatabaseInfoPayload)
+def activate_database(database_id: str) -> DatabaseInfoPayload:
+    try:
+        return _database_payload(db.set_active_database(database_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/databases/{database_id}", response_model=DatabaseInfoPayload)
+def rename_database(
+    database_id: str,
+    payload: RenameDatabaseRequest,
+) -> DatabaseInfoPayload:
+    try:
+        return _database_payload(db.rename_database(database_id, payload.name))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/databases/{database_id}", response_model=DatabaseInfoPayload)
+def delete_database(
+    database_id: str,
+    x_update_token: str | None = Header(default=None),
+) -> DatabaseInfoPayload:
+    updater_runtime.require_update_admin_token(x_update_token)
+    try:
+        return _database_payload(db.delete_database(database_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/inventory", response_model=InventoryPayload)

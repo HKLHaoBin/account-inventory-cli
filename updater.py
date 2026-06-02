@@ -35,7 +35,9 @@ APP_EXE_NAME = "account-inventory-web.exe"
 UPDATER_EXE_NAME = "updater.exe"
 
 LOCK_FILE_NAME = ".updater.pid"
+WATCHER_PID_FILE_NAME = ".updater.watch.pid"
 STATUS_FILE_NAME = ".updater.status.json"
+LOG_FILE_NAME = ".updater.log"
 RUNTIME_FILE_NAME = ".updater.runtime.json"
 SIDECAR_DIR_NAME = ".updater-sidecar"
 BACKUP_DIR = "data/updater-backups"
@@ -105,7 +107,15 @@ def now_iso() -> str:
 def trace(work_dir: Path, stage: str, **extra: Any) -> None:
     payload: dict[str, Any] = {"timestamp": now_iso(), "stage": stage}
     payload.update(extra)
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    line = json.dumps(payload, ensure_ascii=False)
+    print(line, flush=True)
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        with (work_dir / LOG_FILE_NAME).open("a", encoding="utf-8") as fp:
+            fp.write(line)
+            fp.write("\n")
+    except Exception:
+        pass
 
 
 def write_status(work_dir: Path, state: str, message: str, extra: Optional[dict[str, Any]] = None) -> None:
@@ -116,6 +126,7 @@ def write_status(work_dir: Path, state: str, message: str, extra: Optional[dict[
     }
     if extra:
         payload.update(extra)
+    work_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / STATUS_FILE_NAME).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -699,6 +710,24 @@ def sync_runtime_context(ctx: RuntimeContext) -> None:
     ctx.app_version = str(payload.get("app_version") or read_app_version(ctx.work_dir)).strip()
 
 
+def refresh_runtime_app_version(work_dir: Path, app_version: str) -> None:
+    runtime_file = work_dir / RUNTIME_FILE_NAME
+    if not runtime_file.exists():
+        return
+    try:
+        payload = json.loads(runtime_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    payload["app_version"] = app_version
+    payload["timestamp"] = now_iso()
+    try:
+        runtime_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
 def resolve_restart_command(ctx: RuntimeContext) -> list[str]:
     if ctx.backend_mode == "exe":
         executable = ctx.backend_executable or (ctx.work_dir / APP_EXE_NAME)
@@ -827,7 +856,17 @@ def apply_update(ctx: RuntimeContext, prepared: PreparedUpdate) -> dict[str, Any
 
 def finalize_or_rollback(ctx: RuntimeContext, prepared: PreparedUpdate, apply_error: Optional[Exception], apply_extra: Optional[dict[str, Any]]) -> dict[str, Any]:
     if apply_error is None:
-        extra = {"latest_tag": prepared.latest_tag, "repo": prepared.repo, **prepared.summary, **(apply_extra or {})}
+        updated_version = read_app_version(ctx.work_dir)
+        ctx.app_version = updated_version
+        refresh_runtime_app_version(ctx.work_dir, updated_version)
+        extra = {
+            "latest_tag": prepared.latest_tag,
+            "repo": prepared.repo,
+            **prepared.summary,
+            **(apply_extra or {}),
+            "local_version": updated_version,
+            "updated_to_version": updated_version,
+        }
         message = "update finished and backend restarted" if extra.get("restart_required") else "hot update finished"
         write_phase_status(ctx.work_dir, "updated", message, "completed", extra)
         return {"state": "updated", "message": message, "extra": extra}
@@ -901,7 +940,8 @@ def run_update_once(ctx: RuntimeContext, repo: str) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Account inventory updater sidecar")
     parser.add_argument("--watch", action="store_true", help="run forever and check updates every interval")
-    parser.add_argument("--restore-watch", action="store_true", help="restart watcher after one-shot update")
+    parser.add_argument("--restore-watch", action="store_true", help="accepted for compatibility; no effect")
+    parser.add_argument("--print-work-dir-and-exit", action="store_true", help="print resolved work directory and exit")
     parser.add_argument("--interval-hours", type=float, default=24.0, help="watch mode check interval")
     parser.add_argument("--work-dir", default="", help="backend working directory")
     parser.add_argument("--backend-pid", type=int, default=0, help="current backend process pid")
@@ -946,8 +986,6 @@ def build_direct_sidecar_command(args: argparse.Namespace, work_dir: Path, sidec
     command = [str(sidecar_exe)]
     if args.watch:
         command.append("--watch")
-    if args.restore_watch:
-        command.append("--restore-watch")
     command.extend(
         [
             "--interval-hours",
@@ -982,6 +1020,49 @@ def handoff_to_direct_sidecar(args: argparse.Namespace, work_dir: Path) -> int:
     trace(work_dir, "main:handoff", sidecar=str(sidecar_exe), work_dir=str(work_dir), command=command)
     completed = subprocess.run(command, cwd=str(work_dir))
     return int(completed.returncode)
+
+
+def write_watcher_pid(work_dir: Path) -> None:
+    try:
+        (work_dir / WATCHER_PID_FILE_NAME).write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        return
+
+
+def clear_watcher_pid(work_dir: Path) -> None:
+    try:
+        pid = int((work_dir / WATCHER_PID_FILE_NAME).read_text(encoding="utf-8").strip() or "0")
+    except Exception:
+        pid = 0
+    if pid == os.getpid():
+        (work_dir / WATCHER_PID_FILE_NAME).unlink(missing_ok=True)
+
+
+def run_update_cycle(ctx: RuntimeContext, repo: str, watch: bool) -> dict[str, Any]:
+    instance_lock = acquire_single_instance_lock(ctx.work_dir)
+    if instance_lock is None:
+        trace(ctx.work_dir, "lock:exists", pid=os.getpid(), watch=watch, repo=repo)
+        result = {
+            "state": "busy",
+            "message": "skip: update already running",
+            "extra": {"repo": repo},
+            "skipped": True,
+        }
+        if not watch:
+            write_phase_status(ctx.work_dir, "busy", result["message"], "locked", result["extra"])
+        return result
+
+    try:
+        sync_runtime_context(ctx)
+        return run_update_once(ctx, repo)
+    except Exception as exc:
+        trace(ctx.work_dir, "error:exception", error=repr(exc))
+        message = f"update failed: {exc}"
+        extra = {"repo": repo}
+        write_phase_status(ctx.work_dir, "error", message, "failed", extra)
+        return {"state": "error", "message": message, "extra": extra}
+    finally:
+        release_single_instance_lock(instance_lock)
 
 
 def copy_updater_exe_for_sidecar(work_dir: Path) -> Optional[Path]:
@@ -1027,20 +1108,13 @@ def resolve_watcher_command(ctx: RuntimeContext, repo: str, interval_hours: floa
     return command
 
 
-def maybe_restore_watch(ctx: RuntimeContext, repo: str, interval_hours: float) -> None:
-    if not is_pid_running(ctx.backend_pid):
-        return
-    command = resolve_watcher_command(ctx, repo, interval_hours)
-    try:
-        start_backend_detached(command, ctx.work_dir)
-    except Exception:
-        pass
-
-
 def main() -> int:
     args = build_parser().parse_args()
     work_dir = Path(args.work_dir).resolve() if args.work_dir else default_work_dir()
     validate_work_dir(work_dir)
+    if args.print_work_dir_and_exit:
+        print(str(work_dir), flush=True)
+        return 0
     if should_handoff_to_direct_sidecar(args, work_dir):
         return handoff_to_direct_sidecar(args, work_dir)
 
@@ -1056,51 +1130,38 @@ def main() -> int:
     )
 
     trace(work_dir, "main:start", pid=os.getpid(), watch=bool(args.watch), repo=str(args.repo))
-    instance_lock = acquire_single_instance_lock(work_dir)
-    if instance_lock is None:
-        trace(work_dir, "lock:exists", pid=os.getpid())
-        return 0
+    if args.watch:
+        write_watcher_pid(work_dir)
 
     interval_seconds = max(60, int(float(args.interval_hours) * 3600))
     try:
         while True:
-            try:
-                sync_runtime_context(ctx)
-                result = run_update_once(ctx, str(args.repo))
-                last_state = str(result.get("state") or "idle")
-                last_message = str(result.get("message") or "")
-                last_extra = dict(result.get("extra") or {})
-            except Exception as exc:
-                trace(work_dir, "error:exception", error=repr(exc))
-                last_state = "error"
-                last_message = f"update failed: {exc}"
-                last_extra = {"repo": str(args.repo)}
-                write_phase_status(work_dir, last_state, last_message, "failed", last_extra)
+            result = run_update_cycle(ctx, str(args.repo), bool(args.watch))
+            last_state = str(result.get("state") or "idle")
+            last_message = str(result.get("message") or "")
+            last_extra = dict(result.get("extra") or {})
+            skipped = bool(result.get("skipped"))
 
             if not args.watch:
                 break
             sleep_seconds = interval_seconds
-            write_phase_status(
-                work_dir,
-                last_state,
-                last_message,
-                "sleeping",
-                {
-                    **last_extra,
-                    "repo": str(args.repo),
-                    "loop_state": "sleeping",
-                    "interval_seconds": interval_seconds,
-                    "next_check_after_seconds": sleep_seconds,
-                    "last_result_state": last_state,
-                    "last_result_message": last_message,
-                },
-            )
+            sleep_extra = {
+                **last_extra,
+                "repo": str(args.repo),
+                "loop_state": "sleeping",
+                "interval_seconds": interval_seconds,
+                "next_check_after_seconds": sleep_seconds,
+                "last_result_state": last_state,
+                "last_result_message": last_message,
+            }
+            trace(work_dir, "watch:sleep", **sleep_extra)
+            if not skipped:
+                write_phase_status(work_dir, last_state, last_message, "sleeping", sleep_extra)
             time.sleep(sleep_seconds)
     finally:
-        release_single_instance_lock(instance_lock)
+        if args.watch:
+            clear_watcher_pid(work_dir)
 
-    if args.restore_watch and not args.watch:
-        maybe_restore_watch(ctx, str(args.repo), float(args.interval_hours))
     return 0
 
 

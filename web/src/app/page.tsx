@@ -26,6 +26,7 @@ import {
   previewFifo,
   writeOutboundClipboardText,
 } from "@/lib/api";
+import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
 import { isClipboardMessage, getClipboardWsUrl } from "@/lib/ws";
@@ -47,6 +48,17 @@ const EMPTY_DASHBOARD: DashboardPayload = {
     todayInbound: 0,
     todayOutbound: 0,
     pendingCount: 0,
+  },
+  database: {
+    id: "",
+    name: "默认数据库",
+    fileName: "accounts.db",
+    path: "data/accounts.db",
+    createdAt: "",
+    active: true,
+    inventoryCount: 0,
+    todayInbound: 0,
+    todayOutbound: 0,
   },
   fifoPreview: [],
   recentActivities: [],
@@ -338,6 +350,11 @@ export default function DashboardPage() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadDashboard]);
+
+  useEffect(
+    () => subscribeDatabaseChanged(() => void loadDashboard()),
+    [loadDashboard]
+  );
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -666,7 +683,9 @@ export default function DashboardPage() {
   return (
     <div className="space-y-4 lg:space-y-6">
       <div>
-        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">仪表盘</h1>
+        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">
+          {dashboard.database.name} 仪表盘
+        </h1>
         <p className="mt-1 hidden text-sm text-muted-foreground sm:block">
           一屏处理批量入库、快速 FIFO 出库与库存动态
         </p>

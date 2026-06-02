@@ -38,11 +38,29 @@ python main.py
 python main.py
 ```
 
-首次运行会自动创建 `data/accounts.db`；若数据库已存在，会自动迁移添加 `url` 列。
+首次运行会自动创建 `data/databases.json` 数据库注册表和默认数据库 `data/accounts.db`；若旧数据库已存在，会注册为“默认数据库”并自动迁移添加 `url` 列。
 
 ### Windows 可执行文件
 
-推送至 `main` 分支后，GitHub Actions 会自动递增补丁版本号、构建 Windows 版 `account-inventory-cli.exe` 并发布到 [Releases](https://github.com/HKLHaoBin/account-inventory-cli/releases)。下载后双击或在命令行运行即可；数据库会创建在 EXE 同目录下的 `data/accounts.db`。
+推送至 `main` 分支后，GitHub Actions 会自动递增补丁版本号、构建 Windows 版 `account-inventory-cli.exe` 并发布到 [Releases](https://github.com/HKLHaoBin/account-inventory-cli/releases)。下载后双击或在命令行运行即可；数据库注册表和数据库文件会创建在 EXE 同目录下的 `data/` 目录。
+
+### 管理令牌
+
+`UPDATE_ADMIN_TOKEN` 是本地管理令牌，用于 Web 设置页执行更新和删除数据库时校验身份。它不是 GitHub API 令牌；GitHub 限流相关令牌仍使用 `UPDATER_GITHUB_TOKEN`。
+
+临时从当前 PowerShell 会话启动应用：
+
+```powershell
+$env:UPDATE_ADMIN_TOKEN="your-token"; python app.py
+```
+
+写入 Windows 当前用户环境变量：
+
+```powershell
+setx UPDATE_ADMIN_TOKEN "your-token"
+```
+
+使用 `setx` 后需要重启应用。之后在设置页执行更新，或删除数据库的二次确认弹窗中输入同一个令牌。
 
 ## 使用说明
 
@@ -231,12 +249,17 @@ user002----pass456
 ├── parser.py            # 账号行解析与格式化
 ├── test_verification.py # 自动化验证脚本
 └── data/
-    └── accounts.db      # 运行时自动创建
+    ├── databases.json   # 数据库注册表，记录当前活动库
+    └── accounts.db      # 默认数据库，运行时自动创建或注册旧库
 ```
 
 ## 数据存储
 
-数据库文件：`data/accounts.db`
+数据库注册表：`data/databases.json`
+
+默认数据库文件：`data/accounts.db`
+
+新建或克隆的数据库会写入 `data/` 目录下的独立 SQLite 文件，并在注册表中记录 `id`、显示名称、文件名、创建时间和当前活动状态。CLI、Web API 和前端页面都访问当前活动数据库；切换数据库不会删除其他数据库文件。
 
 | 表名 | 用途 | 主要字段 |
 |------|------|----------|

@@ -54,6 +54,22 @@ def ensure_frontend_build() -> None:
     )
 
 
+def frontend_file_for_path(path: str) -> Path:
+    requested = (WEB_OUT_DIR / path).resolve()
+    if requested.is_file() and WEB_OUT_DIR in requested.parents:
+        return requested
+
+    html_route = (WEB_OUT_DIR / f"{path}.html").resolve()
+    if html_route.is_file() and WEB_OUT_DIR in html_route.parents:
+        return html_route
+
+    route_index = (WEB_OUT_DIR / path / "index.html").resolve()
+    if route_index.is_file() and WEB_OUT_DIR in route_index.parents:
+        return route_index
+
+    return WEB_INDEX
+
+
 def mount_frontend() -> None:
     if not WEB_INDEX.exists():
         return
@@ -74,15 +90,7 @@ def mount_frontend() -> None:
         if path.startswith("api/") or path.startswith("ws/"):
             raise HTTPException(status_code=404)
 
-        requested = (WEB_OUT_DIR / path).resolve()
-        if requested.is_file() and WEB_OUT_DIR in requested.parents:
-            return FileResponse(requested)
-
-        route_index = (WEB_OUT_DIR / path / "index.html").resolve()
-        if route_index.is_file() and WEB_OUT_DIR in route_index.parents:
-            return FileResponse(route_index)
-
-        return FileResponse(WEB_INDEX)
+        return FileResponse(frontend_file_for_path(path))
 
 
 def _browser_host(host: str) -> str:

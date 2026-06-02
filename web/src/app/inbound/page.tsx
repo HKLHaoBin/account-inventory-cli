@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/input";
 import { commitInbound, writeAppClipboardText } from "@/lib/api";
+import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
 import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
@@ -192,6 +193,15 @@ export default function InboundPage() {
       socket?.close();
     };
   }, [appendText, resetForText]);
+
+  useEffect(
+    () =>
+      subscribeDatabaseChanged(() => {
+        resetForText(textRef.current);
+        setClipboardState("数据库已切换，请重新确认入库结果");
+      }),
+    [resetForText]
+  );
 
   const displayedRows = useMemo(
     () =>

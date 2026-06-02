@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
 import { fetchOutboundHistory, writeAppClipboardText } from "@/lib/api";
+import { subscribeDatabaseChanged } from "@/lib/database-events";
 import type { OutboundRecord } from "@/types/account";
 import {
   formatAccountLine,
@@ -58,6 +59,11 @@ export default function HistoryPage() {
       active = false;
     };
   }, []);
+
+  useEffect(
+    () => subscribeDatabaseChanged(() => void loadHistory()),
+    [loadHistory]
+  );
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();

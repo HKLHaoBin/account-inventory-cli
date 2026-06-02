@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -813,6 +814,84 @@ def test_insert_outbound_record() -> None:
     assert not db.exists_in_inventory("direct")
 
 
+def test_database_registry_registers_existing_db() -> None:
+    _reset_inventory()
+    db.insert_account("legacy", "pw")
+    db._registry_path().unlink(missing_ok=True)  # type: ignore[attr-defined]
+
+    db.init_db()
+    databases = db.list_database_info()
+    assert len(databases) == 1
+    assert databases[0]["name"] == "默认数据库"
+    assert databases[0]["file_name"] == "accounts.db"
+    assert databases[0]["active"]
+    assert db.exists_in_inventory("legacy")
+
+
+def test_database_create_switch_rename_and_delete() -> None:
+    _reset_inventory()
+    db.insert_account("default_user", "pw")
+    default = db.get_active_database_info()
+
+    created = db.create_database("客户 A")
+    assert created["name"] == "客户 A"
+    assert created["active"]
+    assert db.count_inventory() == 0
+    db.insert_account("new_user", "pw")
+
+    db.set_active_database(default["id"])
+    assert db.exists_in_inventory("default_user")
+    assert not db.exists_in_inventory("new_user")
+
+    renamed = db.rename_database(created["id"], "客户 A 重命名")
+    assert renamed["name"] == "客户 A 重命名"
+
+    db.delete_database(default["id"])
+    databases = db.list_database_info()
+    assert len(databases) == 1
+    assert databases[0]["id"] == created["id"]
+    assert databases[0]["active"]
+
+    replacement = db.delete_database(created["id"])
+    assert replacement["name"] == "默认数据库"
+    assert replacement["active"]
+    assert db.count_inventory() == 0
+
+
+def test_database_clone_copies_data_and_stays_independent() -> None:
+    _reset_inventory()
+    db.insert_account("source_user", "pw")
+    db.insert_outbound_record("source_history", "old_pw")
+    source = db.get_active_database_info()
+
+    try:
+        db.clone_database(source["id"], "   ")
+        raise AssertionError("expected ValueError for empty clone name")
+    except ValueError:
+        pass
+
+    try:
+        db.clone_database("missing", "缺失库副本")
+        raise AssertionError("expected ValueError for missing source")
+    except ValueError:
+        pass
+
+    cloned = db.clone_database(source["id"], "默认数据库副本")
+    assert cloned["name"] == "默认数据库副本"
+    assert cloned["active"]
+    assert cloned["id"] != source["id"]
+    assert cloned["path"] != source["path"]
+    assert Path(cloned["path"]).exists()
+    assert db.exists_in_inventory("source_user")
+    assert db.exists_in_outbound("source_history")
+
+    db.insert_account("clone_only", "pw")
+    db.set_active_database(source["id"])
+    assert db.exists_in_inventory("source_user")
+    assert not db.exists_in_inventory("clone_only")
+    db.delete_database(cloned["id"])
+
+
 def test_process_outbound_batch_mixed() -> None:
     _reset_inventory()
     db.insert_account("in_stock", "p1")
@@ -1193,6 +1272,100 @@ def test_api_clipboard_ignore() -> None:
     assert api._ignored_clipboard_text is None
 
 
+def test_api_database_management() -> None:
+    _reset_inventory()
+    db.insert_account("api_default", "pw")
+    default = db.get_active_database_info()
+    client = _api_client()
+
+    response = client.get("/api/databases")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["activeDatabaseId"] == default["id"]
+    assert payload["databases"][0]["inventoryCount"] == 1
+
+    empty = client.post("/api/databases", json={"name": "   "})
+    assert empty.status_code == 400
+
+    created = client.post("/api/databases", json={"name": "API 库"})
+    assert created.status_code == 200
+    created_payload = created.json()
+    assert created_payload["name"] == "API 库"
+    assert created_payload["active"] is True
+    assert db.count_inventory() == 0
+
+    renamed = client.patch(
+        f"/api/databases/{created_payload['id']}",
+        json={"name": "API 库 2"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "API 库 2"
+
+    activated = client.post(f"/api/databases/{default['id']}/activate")
+    assert activated.status_code == 200
+    assert db.exists_in_inventory("api_default")
+
+    empty_clone = client.post(
+        f"/api/databases/{default['id']}/clone",
+        json={"name": "   "},
+    )
+    assert empty_clone.status_code == 400
+
+    missing_clone = client.post(
+        "/api/databases/missing/clone",
+        json={"name": "缺失副本"},
+    )
+    assert missing_clone.status_code == 400
+
+    cloned = client.post(
+        f"/api/databases/{default['id']}/clone",
+        json={"name": "API 默认库副本"},
+    )
+    assert cloned.status_code == 200
+    cloned_payload = cloned.json()
+    assert cloned_payload["name"] == "API 默认库副本"
+    assert cloned_payload["active"] is True
+    assert cloned_payload["inventoryCount"] == 1
+    db.insert_account("api_clone_only", "pw")
+
+    reactivated = client.post(f"/api/databases/{default['id']}/activate")
+    assert reactivated.status_code == 200
+    assert not db.exists_in_inventory("api_clone_only")
+
+    with mock.patch.dict("os.environ", {"UPDATE_ADMIN_TOKEN": ""}):
+        blocked = client.delete(f"/api/databases/{created_payload['id']}")
+        assert blocked.status_code == 403
+
+    with mock.patch.dict("os.environ", {"UPDATE_ADMIN_TOKEN": "secret"}):
+        wrong = client.delete(
+            f"/api/databases/{created_payload['id']}",
+            headers={"X-Update-Token": "bad"},
+        )
+        assert wrong.status_code == 403
+
+        deleted = client.delete(
+            f"/api/databases/{created_payload['id']}",
+            headers={"X-Update-Token": "secret"},
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["id"] == default["id"]
+
+        cloned_deleted = client.delete(
+            f"/api/databases/{cloned_payload['id']}",
+            headers={"X-Update-Token": "secret"},
+        )
+        assert cloned_deleted.status_code == 200
+        assert cloned_deleted.json()["id"] == default["id"]
+
+        replacement = client.delete(
+            f"/api/databases/{default['id']}",
+            headers={"X-Update-Token": "secret"},
+        )
+        assert replacement.status_code == 200
+        assert replacement.json()["name"] == "默认数据库"
+        assert db.count_inventory() == 0
+
+
 def test_updater_version_compare() -> None:
     import updater
 
@@ -1419,7 +1592,125 @@ def test_updater_direct_sidecar_command_uses_install_work_dir() -> None:
     assert command[0] == str(sidecar)
     assert "--work-dir" in command
     assert command[command.index("--work-dir") + 1] == str(work_dir)
-    assert "--restore-watch" in command
+    assert "--restore-watch" not in command
+
+
+def test_updater_print_work_dir_exits_before_update() -> None:
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        with mock.patch.object(sys, "argv", ["updater.py", "--work-dir", str(root), "--print-work-dir-and-exit"]), mock.patch(
+            "builtins.print"
+        ) as print_mock, mock.patch.object(updater, "run_update_cycle") as cycle_mock:
+            assert updater.main() == 0
+
+    print_mock.assert_called_once_with(str(root), flush=True)
+    cycle_mock.assert_not_called()
+
+
+def test_updater_trace_writes_log_file() -> None:
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        updater.trace(root, "test:stage", value=123)
+        lines = (root / updater.LOG_FILE_NAME).read_text(encoding="utf-8").splitlines()
+
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["stage"] == "test:stage"
+    assert payload["value"] == 123
+
+
+def test_updater_one_shot_lock_skip_writes_status_and_log() -> None:
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ctx = updater.RuntimeContext(root, 8000, 0, "python", None, None, Path(sys.executable), "0.1.0")
+        lock = updater.acquire_single_instance_lock(root)
+        try:
+            result = updater.run_update_cycle(ctx, "owner/repo", watch=False)
+        finally:
+            updater.release_single_instance_lock(lock)
+
+        status = json.loads((root / updater.STATUS_FILE_NAME).read_text(encoding="utf-8"))
+        log_text = (root / updater.LOG_FILE_NAME).read_text(encoding="utf-8")
+
+    assert result["state"] == "busy"
+    assert result["skipped"] is True
+    assert status["state"] == "busy"
+    assert status["phase"] == "locked"
+    assert "lock:exists" in log_text
+
+
+def test_updater_main_one_shot_runs_once_without_sleep() -> None:
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        with mock.patch.object(sys, "argv", ["updater.py", "--work-dir", str(root)]), mock.patch.object(
+            updater,
+            "run_update_cycle",
+            return_value={"state": "idle", "message": "already up-to-date", "extra": {}},
+        ) as cycle_mock, mock.patch("updater.time.sleep") as sleep_mock:
+            assert updater.main() == 0
+
+    cycle_mock.assert_called_once()
+    sleep_mock.assert_not_called()
+
+
+def test_update_success_refreshes_status_and_runtime_version() -> None:
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "VERSION").write_text("0.1.0", encoding="utf-8")
+        (root / updater.RUNTIME_FILE_NAME).write_text(
+            json.dumps({"app_version": "0.1.0", "port": 8000}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        ctx = updater.RuntimeContext(root, 8000, 0, "python", None, None, Path(sys.executable), "0.1.0")
+
+        def fake_prepare(
+            ctx_arg: updater.RuntimeContext,
+            repo: str,
+            latest_tag: str,
+            zip_url: str,
+            sha_url: str,
+            temp_root: Path,
+            summary: dict[str, object],
+        ) -> updater.PreparedUpdate:
+            (root / "VERSION").write_text("0.2.0", encoding="utf-8")
+            return updater.PreparedUpdate(repo, latest_tag, root, root, dict(summary))
+
+        with mock.patch.object(
+            updater,
+            "github_latest_release",
+            return_value={
+                "tag_name": "v0.2.0",
+                "assets": [
+                    {"name": updater.RELEASE_ZIP_NAME, "browser_download_url": "https://example.com/app.zip"},
+                    {"name": updater.RELEASE_SHA256_NAME, "browser_download_url": "https://example.com/app.zip.sha256"},
+                ],
+            },
+        ), mock.patch.object(updater, "prepare_update", side_effect=fake_prepare), mock.patch.object(
+            updater,
+            "apply_update",
+            return_value={"restart_required": False, "updated_targets": ["VERSION"]},
+        ):
+            result = updater.run_update_once(ctx, "owner/repo")
+
+        status = json.loads((root / updater.STATUS_FILE_NAME).read_text(encoding="utf-8"))
+        runtime = json.loads((root / updater.RUNTIME_FILE_NAME).read_text(encoding="utf-8"))
+
+    assert result["state"] == "updated"
+    assert result["extra"]["local_version"] == "0.2.0"
+    assert result["extra"]["updated_to_version"] == "0.2.0"
+    assert status["local_version"] == "0.2.0"
+    assert status["updated_to_version"] == "0.2.0"
+    assert runtime["app_version"] == "0.2.0"
 
 
 def test_download_to_retries_connection_error_and_cleans_part() -> None:
@@ -1555,9 +1846,10 @@ def test_launch_update_once_command() -> None:
             pid = updater_runtime.launch_update_once(root)
 
     assert pid == 4321
-    stop.assert_called_once()
+    stop.assert_not_called()
     command = popen.call_args.args[0]
-    assert "--restore-watch" in command
+    assert "--restore-watch" not in command
+    assert "--watch" not in command
     assert "--work-dir" in command
     assert str(root) in command
     assert "--port" in command
@@ -1584,6 +1876,30 @@ def test_app_browser_url_ipv6() -> None:
 
     assert web_app._browser_url("::1", 8000) == "http://[::1]:8000/"
     assert web_app._browser_url("[::1]", 8000) == "http://[::1]:8000/"
+
+
+def test_app_frontend_file_for_html_route() -> None:
+    import app as web_app
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_dir = Path(tmp) / "out"
+        out_dir.mkdir()
+        index = out_dir / "index.html"
+        settings = out_dir / "settings.html"
+        nested = out_dir / "history" / "index.html"
+        index.write_text("home", encoding="utf-8")
+        settings.write_text("settings", encoding="utf-8")
+        nested.parent.mkdir()
+        nested.write_text("history", encoding="utf-8")
+
+        with mock.patch.object(web_app, "WEB_OUT_DIR", out_dir), mock.patch.object(
+            web_app,
+            "WEB_INDEX",
+            index,
+        ):
+            assert web_app.frontend_file_for_path("settings") == settings.resolve()
+            assert web_app.frontend_file_for_path("history") == nested.resolve()
+            assert web_app.frontend_file_for_path("missing") == index
 
 
 def test_app_open_browser_after_port_ready() -> None:
@@ -1669,6 +1985,9 @@ def run_all() -> tuple[int, list[str]]:
         ("classify outbound re-inbound ready", test_classify_outbound_line_reinbound_ready),
         ("classify outbound batch duplicate", test_classify_outbound_line_batch_duplicate),
         ("insert_outbound_record", test_insert_outbound_record),
+        ("database registry existing db", test_database_registry_registers_existing_db),
+        ("database create switch rename delete", test_database_create_switch_rename_and_delete),
+        ("database clone copies data", test_database_clone_copies_data_and_stays_independent),
         ("process outbound batch mixed", test_process_outbound_batch_mixed),
         ("outbound paste mode stays after batch", test_outbound_paste_mode_stays_after_batch),
         ("handle entry outbound paste", test_handle_entry_outbound_paste),
@@ -1683,6 +2002,7 @@ def run_all() -> tuple[int, list[str]]:
         ("api outbound by username", test_api_outbound_by_username),
         ("api outbound paste commit", test_api_outbound_paste_commit),
         ("api clipboard ignore", test_api_clipboard_ignore),
+        ("api database management", test_api_database_management),
         ("updater version compare", test_updater_version_compare),
         ("updater release assets", test_updater_release_assets),
         ("updater ignores github token env", test_updater_ignores_github_token_env),
@@ -1693,6 +2013,11 @@ def run_all() -> tuple[int, list[str]]:
         ("updater frozen default work dir", test_updater_frozen_default_work_dir_is_exe_parent),
         ("updater rejects pyinstaller temp work dir", test_updater_rejects_pyinstaller_temp_work_dir),
         ("updater direct sidecar command", test_updater_direct_sidecar_command_uses_install_work_dir),
+        ("updater print work dir exits", test_updater_print_work_dir_exits_before_update),
+        ("updater trace writes log", test_updater_trace_writes_log_file),
+        ("updater one shot lock skip", test_updater_one_shot_lock_skip_writes_status_and_log),
+        ("updater main one shot once", test_updater_main_one_shot_runs_once_without_sleep),
+        ("update success refreshes version", test_update_success_refreshes_status_and_runtime_version),
         ("download retry connection error", test_download_to_retries_connection_error_and_cleans_part),
         ("download retry http status", test_download_to_retries_503_but_not_404),
         ("updater whitelist", test_updater_whitelist_blocks_data_and_source),
@@ -1701,6 +2026,7 @@ def run_all() -> tuple[int, list[str]]:
         ("app browser url localhost", test_app_browser_url_localhost),
         ("app browser url wildcard host", test_app_browser_url_wildcard_host),
         ("app browser url ipv6", test_app_browser_url_ipv6),
+        ("app frontend html route", test_app_frontend_file_for_html_route),
         ("app open browser after port ready", test_app_open_browser_after_port_ready),
         ("app browser open failure", test_app_browser_open_failure_does_not_raise),
     ]

@@ -99,8 +99,38 @@ export interface DashboardPayload {
     todayOutbound: number;
     pendingCount: number;
   };
+  database: DatabaseInfo;
   fifoPreview: Account[];
   recentActivities: ActivityItem[];
+}
+
+export interface DatabaseInfo {
+  id: string;
+  name: string;
+  fileName: string;
+  path: string;
+  createdAt: string;
+  active: boolean;
+  inventoryCount: number;
+  todayInbound: number;
+  todayOutbound: number;
+}
+
+export interface DatabaseListPayload {
+  databases: DatabaseInfo[];
+  activeDatabaseId: string;
+}
+
+export interface CreateDatabaseRequest {
+  name: string;
+}
+
+export interface CloneDatabaseRequest {
+  name: string;
+}
+
+export interface RenameDatabaseRequest {
+  name: string;
 }
 
 export interface InboundPreviewRow {

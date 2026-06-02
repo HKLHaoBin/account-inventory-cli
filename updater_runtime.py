@@ -20,6 +20,7 @@ ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) el
 RUNTIME_FILE_NAME = ".updater.runtime.json"
 STATUS_FILE_NAME = ".updater.status.json"
 LOCK_FILE_NAME = ".updater.pid"
+WATCHER_PID_FILE_NAME = ".updater.watch.pid"
 SIDECAR_DIR_NAME = ".updater-sidecar"
 UPDATE_ADMIN_TOKEN_ENV = "UPDATE_ADMIN_TOKEN"
 AUTO_UPDATE_ENV = "UPDATE_AUTO_ENABLED"
@@ -28,6 +29,7 @@ AUTO_UPDATE_INTERVAL_ENV = "UPDATE_INTERVAL_HOURS"
 _runtime_payload: dict[str, Any] = {}
 _watcher_pid: int = 0
 BUSY_UPDATE_STATES = {
+    "busy",
     "checking",
     "downloading",
     "extracting",
@@ -142,6 +144,21 @@ def _read_lock_pid(root: Path = ROOT) -> int:
         return 0
 
 
+def _read_watcher_pid(root: Path = ROOT) -> int:
+    try:
+        raw = (root / WATCHER_PID_FILE_NAME).read_text(encoding="utf-8").strip()
+        return int(raw or "0")
+    except Exception:
+        return 0
+
+
+def _write_watcher_pid(pid: int, root: Path = ROOT) -> None:
+    try:
+        (root / WATCHER_PID_FILE_NAME).write_text(str(int(pid)), encoding="utf-8")
+    except OSError:
+        return
+
+
 def _terminate_pid(pid: int) -> None:
     if pid <= 0 or not is_pid_running(pid):
         return
@@ -166,12 +183,15 @@ def wait_for_update_lock_release(root: Path = ROOT, timeout_seconds: float = 8.0
 
 def stop_update_watcher(root: Path = ROOT) -> None:
     global _watcher_pid
-    lock_pid = _read_lock_pid(root)
-    for pid in {lock_pid, _watcher_pid}:
+    watcher_pid = _read_watcher_pid(root)
+    for pid in {watcher_pid, _watcher_pid}:
         if pid > 0 and pid != os.getpid():
             _terminate_pid(pid)
     _watcher_pid = 0
-    wait_for_update_lock_release(root)
+    try:
+        (root / WATCHER_PID_FILE_NAME).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _creation_flags() -> int:
@@ -241,18 +261,19 @@ def _popen_detached(command: list[str], root: Path = ROOT) -> subprocess.Popen[A
 
 def launch_update_watcher(root: Path = ROOT) -> int:
     global _watcher_pid
-    if _read_lock_pid(root) > 0 and is_pid_running(_read_lock_pid(root)):
-        return _read_lock_pid(root)
+    watcher_pid = _read_watcher_pid(root)
+    if watcher_pid > 0 and is_pid_running(watcher_pid):
+        return watcher_pid
     command = _updater_command(root) + ["--watch", "--interval-hours", os.getenv(AUTO_UPDATE_INTERVAL_ENV, "24")]
     command.extend(_runtime_args(root))
     process = _popen_detached(command, root)
     _watcher_pid = int(process.pid)
+    _write_watcher_pid(_watcher_pid, root)
     return _watcher_pid
 
 
 def launch_update_once(root: Path = ROOT) -> int:
-    stop_update_watcher(root)
-    command = _updater_command(root) + ["--restore-watch"]
+    command = _updater_command(root)
     command.extend(_runtime_args(root))
     process = _popen_detached(command, root)
     return int(process.pid)
@@ -272,6 +293,7 @@ def maybe_start_auto_update(root: Path = ROOT) -> None:
 def check_latest_update(root: Path = ROOT) -> dict[str, Any]:
     repo = os.getenv("UPDATER_GITHUB_REPO", updater.GITHUB_REPO)
     local_version = read_app_version(root)
+    updater.trace(root, "runtime:check-update", repo=repo, local_version=local_version)
 
     try:
         result = updater.inspect_latest_release(repo, local_version)
@@ -280,6 +302,7 @@ def check_latest_update(root: Path = ROOT) -> dict[str, Any]:
         updater.write_phase_status(root, state, message, "completed", result)
         return read_update_status(root)
     except Exception as exc:
+        updater.trace(root, "runtime:check-update:error", repo=repo, error=repr(exc))
         updater.write_phase_status(root, "error", f"update check failed: {exc}", "failed", {"repo": repo})
         return read_update_status(root)
 
@@ -298,6 +321,7 @@ def trigger_update(token: str | None, root: Path = ROOT) -> dict[str, Any]:
     if status.get("state") in BUSY_UPDATE_STATES and status.get("phase") != "sleeping":
         raise HTTPException(status_code=409, detail="update is already running")
     pid = launch_update_once(root)
+    updater.trace(root, "runtime:trigger-update", repo=os.getenv("UPDATER_GITHUB_REPO", updater.GITHUB_REPO), sidecar_pid=pid)
     updater.write_phase_status(
         root,
         "launching",

@@ -16,6 +16,7 @@ import {
   writeAppClipboardText,
   writeOutboundClipboardText,
 } from "@/lib/api";
+import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
 import { cn, maskValue } from "@/lib/utils";
@@ -153,6 +154,15 @@ export default function OutboundPastePage() {
       socket?.close();
     };
   }, [appendText, resetForText]);
+
+  useEffect(
+    () =>
+      subscribeDatabaseChanged(() => {
+        resetForText(textRef.current);
+        setClipboardState("数据库已切换，请重新确认出库结果");
+      }),
+    [resetForText]
+  );
 
   const displayedRows = useMemo(
     () =>

@@ -117,6 +117,18 @@ jobs:
           test -f dist/account-inventory-web.exe
           test -f dist/updater.exe
 
+      - name: Smoke test updater work directory
+        shell: pwsh
+        run: |
+          $expected = (Resolve-Path "dist").Path
+          $actual = (& ".\dist\updater.exe" --print-work-dir-and-exit).Trim()
+          if ($actual -like "*_MEI*") {
+            throw "updater resolved PyInstaller temp work dir: $actual"
+          }
+          if ((Resolve-Path $actual).Path -ne $expected) {
+            throw "updater work dir mismatch. expected=$expected actual=$actual"
+          }
+
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
         with:
@@ -176,7 +188,8 @@ jobs:
             "普通用户推荐下载："
             "- account-inventory-web-windows.zip"
             ""
-            "下载后推荐双击 start-web.bat，或运行 account-inventory-web.exe。不要把 updater.exe 当作主程序直接运行；它只是主程序调用的更新辅助程序。"
+            "下载后推荐双击 start-web.bat，或运行 account-inventory-web.exe。"
+            "用户也可以手动运行 updater.exe 执行一次性更新；只有通过软件启动的自动更新或显式 --watch 参数才会进入持续检测。"
             ""
             "需要固定版本归档时下载："
             "- account-inventory-web-$version-windows.zip"
@@ -213,7 +226,8 @@ jobs:
             ""
             "- updater.exe"
             "  - 自动更新辅助程序。"
-            "  - 普通用户不需要直接运行它；请通过 start-web.bat 或 account-inventory-web.exe 启动软件。"
+            "  - 直接运行时只执行一次性更新，完成后自动退出。"
+            "  - 持续检测模式只由软件启动或显式 --watch 参数进入。"
             ""
             "- start-web.bat"
             "  - Windows 双击启动脚本，会运行 account-inventory-web.exe。"
@@ -253,6 +267,22 @@ jobs:
           Copy-Item $versioned $stable -Force
           $hash = (Get-FileHash -Algorithm SHA256 $stable).Hash.ToLower()
           "$hash  $stable" | Set-Content -Path "$stable.sha256" -Encoding ASCII
+
+      - name: Smoke test packaged updater work directory
+        shell: pwsh
+        run: |
+          $stable = "account-inventory-web-windows.zip"
+          $smokeDir = "release-smoke"
+          Remove-Item -Recurse -Force $smokeDir -ErrorAction SilentlyContinue
+          Expand-Archive -Path $stable -DestinationPath $smokeDir -Force
+          $expected = (Resolve-Path $smokeDir).Path
+          $actual = (& ".\$smokeDir\updater.exe" --print-work-dir-and-exit).Trim()
+          if ($actual -like "*_MEI*") {
+            throw "packaged updater resolved PyInstaller temp work dir: $actual"
+          }
+          if ((Resolve-Path $actual).Path -ne $expected) {
+            throw "packaged updater work dir mismatch. expected=$expected actual=$actual"
+          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import json
+import shutil
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,18 +20,134 @@ def _app_dir() -> Path:
 
 _DATA_DIR = _app_dir() / "data"
 _DB_NAME = "accounts.db"
+_REGISTRY_NAME = "databases.json"
+_DEFAULT_DB_ID = "default"
+_DEFAULT_DB_NAME = "默认数据库"
 
 
 def get_db_path() -> Path:
-    return _DATA_DIR / _DB_NAME
+    active = _active_database_record()
+    return _DATA_DIR / active["file_name"]
 
 
-def _connect() -> sqlite3.Connection:
+def _connect_to(path: Path) -> sqlite3.Connection:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _connect() -> sqlite3.Connection:
+    return _connect_to(get_db_path())
+
+
+def _registry_path() -> Path:
+    return _DATA_DIR / _REGISTRY_NAME
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _default_database_record() -> dict[str, Any]:
+    return {
+        "id": _DEFAULT_DB_ID,
+        "name": _DEFAULT_DB_NAME,
+        "file_name": _DB_NAME,
+        "created_at": _now_iso(),
+        "active": True,
+    }
+
+
+def _database_path(record: dict[str, Any]) -> Path:
+    return _DATA_DIR / str(record["file_name"])
+
+
+def _read_registry_payload() -> dict[str, Any]:
+    path = _registry_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_registry(records: list[dict[str, Any]], active_id: str) -> None:
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    normalized: list[dict[str, Any]] = []
+    for record in records:
+        item = dict(record)
+        item["active"] = item["id"] == active_id
+        normalized.append(item)
+    payload = {
+        "active_database_id": active_id,
+        "databases": normalized,
+    }
+    _registry_path().write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _normalize_registry(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    raw_records = payload.get("databases")
+    if not isinstance(raw_records, list):
+        return [], ""
+
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            continue
+        database_id = str(raw.get("id") or "").strip()
+        file_name = str(raw.get("file_name") or "").strip()
+        if not database_id or not file_name or database_id in seen:
+            continue
+        records.append(
+            {
+                "id": database_id,
+                "name": str(raw.get("name") or _DEFAULT_DB_NAME).strip()
+                or _DEFAULT_DB_NAME,
+                "file_name": Path(file_name).name,
+                "created_at": str(raw.get("created_at") or _now_iso()),
+                "active": bool(raw.get("active")),
+            }
+        )
+        seen.add(database_id)
+
+    active_id = str(payload.get("active_database_id") or "").strip()
+    if not active_id:
+        active = next((record for record in records if record["active"]), None)
+        active_id = str(active["id"]) if active else ""
+    if records and active_id not in {record["id"] for record in records}:
+        active_id = str(records[0]["id"])
+    return records, active_id
+
+
+def _ensure_registry() -> tuple[list[dict[str, Any]], str]:
+    payload = _read_registry_payload()
+    records, active_id = _normalize_registry(payload)
+    if not records:
+        records = [_default_database_record()]
+        active_id = _DEFAULT_DB_ID
+        _write_registry(records, active_id)
+        return records, active_id
+
+    if not any(record["active"] for record in records):
+        _write_registry(records, active_id)
+        records, active_id = _normalize_registry(_read_registry_payload())
+    return records, active_id
+
+
+def _active_database_record() -> dict[str, Any]:
+    records, active_id = _ensure_registry()
+    for record in records:
+        if record["id"] == active_id:
+            return record
+    return records[0]
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -45,33 +165,209 @@ def _escape_like(substring: str) -> str:
     return substring.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def init_db() -> None:
-    with _connect() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS accounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password TEXT NOT NULL,
-                email TEXT,
-                email_password TEXT,
-                url TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-            );
+def _init_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            email TEXT,
+            email_password TEXT,
+            url TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
 
-            CREATE TABLE IF NOT EXISTS outbound_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                password TEXT NOT NULL,
-                email TEXT,
-                email_password TEXT,
-                url TEXT,
-                inbound_at TEXT NOT NULL,
-                outbound_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-            );
+        CREATE TABLE IF NOT EXISTS outbound_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            email TEXT,
+            email_password TEXT,
+            url TEXT,
+            inbound_at TEXT NOT NULL,
+            outbound_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+        """
+    )
+    _migrate_add_url_column(conn)
+
+
+def _init_database_file(record: dict[str, Any]) -> None:
+    with _connect_to(_database_path(record)) as conn:
+        _init_schema(conn)
+
+
+def init_db() -> None:
+    record = _active_database_record()
+    _init_database_file(record)
+
+
+def _public_database_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": record["id"],
+        "name": record["name"],
+        "file_name": record["file_name"],
+        "path": str(_database_path(record)),
+        "created_at": record["created_at"],
+        "active": bool(record["active"]),
+    }
+
+
+def list_databases() -> list[dict[str, Any]]:
+    records, active_id = _ensure_registry()
+    return [
+        _public_database_record({**record, "active": record["id"] == active_id})
+        for record in records
+    ]
+
+
+def get_active_database() -> dict[str, Any]:
+    return _public_database_record(_active_database_record())
+
+
+def _counts_for_record(record: dict[str, Any]) -> dict[str, int]:
+    _init_database_file(record)
+    with _connect_to(_database_path(record)) as conn:
+        inventory = conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()
+        inbound = conn.execute(
             """
-        )
-        _migrate_add_url_column(conn)
+            SELECT COUNT(*) AS n
+            FROM accounts
+            WHERE date(created_at) = date('now', 'localtime')
+            """
+        ).fetchone()
+        outbound = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM outbound_records
+            WHERE date(outbound_at) = date('now', 'localtime')
+            """
+        ).fetchone()
+    return {
+        "inventory_count": int(inventory["n"]),
+        "today_inbound": int(inbound["n"]),
+        "today_outbound": int(outbound["n"]),
+    }
+
+
+def database_info(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_public_database_record(record),
+        **_counts_for_record(record),
+    }
+
+
+def list_database_info() -> list[dict[str, Any]]:
+    records, active_id = _ensure_registry()
+    return [
+        database_info({**record, "active": record["id"] == active_id})
+        for record in records
+    ]
+
+
+def get_active_database_info() -> dict[str, Any]:
+    return database_info(_active_database_record())
+
+
+def _validate_database_name(name: str) -> str:
+    value = name.strip()
+    if not value:
+        raise ValueError("数据库名称不能为空")
+    if len(value) > 60:
+        raise ValueError("数据库名称不能超过 60 个字符")
+    return value
+
+
+def create_database(name: str) -> dict[str, Any]:
+    records, _ = _ensure_registry()
+    database_id = uuid.uuid4().hex
+    record = {
+        "id": database_id,
+        "name": _validate_database_name(name),
+        "file_name": f"accounts-{database_id[:12]}.db",
+        "created_at": _now_iso(),
+        "active": True,
+    }
+    records.append(record)
+    _write_registry(records, database_id)
+    _init_database_file(record)
+    return database_info(record)
+
+
+def clone_database(database_id: str, name: str) -> dict[str, Any]:
+    records, _ = _ensure_registry()
+    source = next((item for item in records if item["id"] == database_id), None)
+    if source is None:
+        raise ValueError("数据库不存在")
+
+    _init_database_file(source)
+    clone_id = uuid.uuid4().hex
+    clone = {
+        "id": clone_id,
+        "name": _validate_database_name(name),
+        "file_name": f"accounts-{clone_id[:12]}.db",
+        "created_at": _now_iso(),
+        "active": True,
+    }
+
+    try:
+        shutil.copy2(_database_path(source), _database_path(clone))
+    except OSError as exc:
+        raise ValueError(f"克隆数据库文件失败：{exc}") from exc
+
+    records.append(clone)
+    _write_registry(records, clone_id)
+    _init_database_file(clone)
+    return database_info(clone)
+
+
+def set_active_database(database_id: str) -> dict[str, Any]:
+    records, _ = _ensure_registry()
+    record = next((item for item in records if item["id"] == database_id), None)
+    if record is None:
+        raise ValueError("数据库不存在")
+    _write_registry(records, database_id)
+    _init_database_file(record)
+    return database_info({**record, "active": True})
+
+
+def rename_database(database_id: str, name: str) -> dict[str, Any]:
+    records, active_id = _ensure_registry()
+    record = next((item for item in records if item["id"] == database_id), None)
+    if record is None:
+        raise ValueError("数据库不存在")
+    record["name"] = _validate_database_name(name)
+    _write_registry(records, active_id)
+    return database_info({**record, "active": record["id"] == active_id})
+
+
+def delete_database(database_id: str) -> dict[str, Any]:
+    records, active_id = _ensure_registry()
+    record = next((item for item in records if item["id"] == database_id), None)
+    if record is None:
+        raise ValueError("数据库不存在")
+
+    remaining = [item for item in records if item["id"] != database_id]
+    target_path = _database_path(record)
+    try:
+        target_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ValueError(f"删除数据库文件失败：{exc}") from exc
+
+    if not remaining:
+        replacement = _default_database_record()
+        remaining = [replacement]
+        active_id = replacement["id"]
+        _write_registry(remaining, active_id)
+        _init_database_file(replacement)
+        return database_info(replacement)
+
+    next_active_id = active_id if active_id != database_id else str(remaining[0]["id"])
+    _write_registry(remaining, next_active_id)
+    active = next(item for item in remaining if item["id"] == next_active_id)
+    _init_database_file(active)
+    return database_info({**active, "active": True})
 
 
 def count_inventory() -> int:

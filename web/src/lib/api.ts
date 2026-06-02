@@ -1,5 +1,7 @@
 import type {
   Account,
+  DatabaseInfo,
+  DatabaseListPayload,
   DashboardPayload,
   FifoCommitPayload,
   FifoPreviewPayload,
@@ -44,6 +46,55 @@ async function requestJson<T>(
 
 export function fetchDashboard(): Promise<DashboardPayload> {
   return requestJson<DashboardPayload>("/api/dashboard");
+}
+
+export function fetchDatabases(): Promise<DatabaseListPayload> {
+  return requestJson<DatabaseListPayload>("/api/databases");
+}
+
+export function createDatabase(name: string): Promise<DatabaseInfo> {
+  return requestJson<DatabaseInfo>("/api/databases", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function cloneDatabase(
+  databaseId: string,
+  name: string
+): Promise<DatabaseInfo> {
+  return requestJson<DatabaseInfo>(`/api/databases/${databaseId}/clone`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function activateDatabase(databaseId: string): Promise<DatabaseInfo> {
+  return requestJson<DatabaseInfo>(`/api/databases/${databaseId}/activate`, {
+    method: "POST",
+  });
+}
+
+export function renameDatabase(
+  databaseId: string,
+  name: string
+): Promise<DatabaseInfo> {
+  return requestJson<DatabaseInfo>(`/api/databases/${databaseId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function deleteDatabase(
+  databaseId: string,
+  token: string
+): Promise<DatabaseInfo> {
+  return requestJson<DatabaseInfo>(`/api/databases/${databaseId}`, {
+    method: "DELETE",
+    headers: {
+      "X-Update-Token": token,
+    },
+  });
 }
 
 export async function fetchInventory(): Promise<Account[]> {

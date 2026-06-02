@@ -13,6 +13,7 @@ import {
   writeAppClipboardText,
   writeOutboundClipboardText,
 } from "@/lib/api";
+import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
 import type { SearchResult } from "@/types/account";
 
@@ -90,6 +91,11 @@ function SearchContent() {
       window.clearTimeout(timer);
     };
   }, [loadResults]);
+
+  useEffect(
+    () => subscribeDatabaseChanged(() => void loadResults()),
+    [loadResults]
+  );
 
   const copyResult = (r: SearchResult) => {
     const a = r.account;

@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
 import { fetchInventory, writeAppClipboardText } from "@/lib/api";
+import { subscribeDatabaseChanged } from "@/lib/database-events";
 import {
   cn,
   formatAccountLine,
@@ -77,6 +78,11 @@ export default function InventoryPage() {
       active = false;
     };
   }, []);
+
+  useEffect(
+    () => subscribeDatabaseChanged(() => void loadInventory()),
+    [loadInventory]
+  );
 
   const sorted = useMemo(() => {
     let items = [...records];
