@@ -28,7 +28,6 @@ import {
   previewFifo,
   writeOutboundClipboardText,
 } from "@/lib/api";
-import { useAccountNotesLookup } from "@/lib/use-account-notes-lookup";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
@@ -442,8 +441,6 @@ export default function DashboardPage() {
     if (!inboundTextRef.current || !rulesReady) return;
     setPreviewRows(buildDraftRows(inboundTextRef.current, enabledSeparators));
   }, [enabledSeparators, rulesReady]);
-
-  useAccountNotesLookup(previewRows, setPreviewRows, rulesReady);
 
   function updatePreviewRow(clientId: string, patch: Partial<InboundPreviewRow>) {
     setPreviewRows((rows) =>
@@ -1050,7 +1047,6 @@ export default function DashboardPage() {
                           </td>
                           <td className="min-w-[140px] px-3 py-2.5">
                             <OutboundNoteField
-                              existingNote={row.existingAccountNote}
                               value={row.note ?? ""}
                               onChange={(note) =>
                                 updatePreviewRow(row.clientId, {
@@ -1161,7 +1157,6 @@ export default function DashboardPage() {
                               </p>
                             )}
                             <OutboundNoteField
-                              existingNote={row.existingAccountNote}
                               value={row.note ?? ""}
                               onChange={(note) =>
                                 updatePreviewRow(row.clientId, {

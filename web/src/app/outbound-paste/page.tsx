@@ -18,7 +18,6 @@ import {
   writeAppClipboardText,
   writeOutboundClipboardText,
 } from "@/lib/api";
-import { useAccountNotesLookup } from "@/lib/use-account-notes-lookup";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { useSeparatorRules } from "@/lib/use-separator-rules";
@@ -175,8 +174,6 @@ export default function OutboundPastePage() {
     if (!textRef.current || !rulesReady) return;
     setDraftRows(buildDraftRows(textRef.current, enabledSeparators));
   }, [enabledSeparators, rulesReady]);
-
-  useAccountNotesLookup(draftRows, setDraftRows, rulesReady);
 
   function updateDraftRow(clientId: string, patch: Partial<OutboundPasteRow>) {
     setDraftRows((rows) =>
@@ -355,7 +352,6 @@ export default function OutboundPastePage() {
                       </td>
                       <td className="min-w-[140px] px-3 py-2.5">
                         <OutboundNoteField
-                          existingNote={row.existingAccountNote}
                           value={row.note ?? ""}
                           onChange={(note) =>
                             updateDraftRow(row.clientId, {
@@ -430,7 +426,6 @@ export default function OutboundPastePage() {
                           <p className="break-all font-mono">{row.url}</p>
                         )}
                         <OutboundNoteField
-                          existingNote={row.existingAccountNote}
                           value={row.note ?? ""}
                           onChange={(note) =>
                             updateDraftRow(row.clientId, {

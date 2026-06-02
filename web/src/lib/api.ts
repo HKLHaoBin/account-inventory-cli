@@ -170,18 +170,6 @@ export function commitInbound(
   });
 }
 
-export function fetchAccountNotes(
-  usernames: string[]
-): Promise<Record<string, string>> {
-  return requestJson<{ notes: Record<string, string> }>(
-    "/api/account-notes/lookup",
-    {
-      method: "POST",
-      body: JSON.stringify({ usernames }),
-    }
-  ).then((payload) => payload.notes);
-}
-
 export function previewFifo(quantity: number): Promise<FifoPreviewPayload> {
   return requestJson<FifoPreviewPayload>("/api/outbound/fifo/preview", {
     method: "POST",

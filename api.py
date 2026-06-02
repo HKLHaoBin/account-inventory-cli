@@ -259,14 +259,6 @@ class FifoCommitRequest(BaseModel):
     notes: list[FifoNoteEntry] = Field(default_factory=list)
 
 
-class AccountNotesLookupRequest(BaseModel):
-    usernames: list[str] = Field(default_factory=list)
-
-
-class AccountNotesLookupPayload(BaseModel):
-    notes: dict[str, str]
-
-
 class OutboundByUsernameRequest(BaseModel):
     username: str
     note: str | None = None
@@ -896,13 +888,6 @@ def preview_fifo(payload: FifoQuantityRequest) -> FifoPreviewPayload:
         quantity=quantity,
         rows=[_account_payload(row) for row in db.fifo_preview_many(quantity)],
     )
-
-
-@app.post("/api/account-notes/lookup", response_model=AccountNotesLookupPayload)
-def lookup_account_notes(
-    payload: AccountNotesLookupRequest,
-) -> AccountNotesLookupPayload:
-    return AccountNotesLookupPayload(notes=db.get_account_notes(payload.usernames))
 
 
 @app.post("/api/outbound/fifo/commit", response_model=FifoCommitPayload)

@@ -108,8 +108,6 @@ export interface OutboundPasteRow {
   reason?: string | null;
   note?: string | null;
   overwriteNote?: boolean;
-  /** UI-only: account note from DB before user edits (inbound/paste lookup). */
-  existingAccountNote?: string | null;
 }
 
 export interface ActivityItem {
@@ -209,8 +207,6 @@ export interface InboundPreviewRow {
   deleted?: boolean;
   note?: string | null;
   overwriteNote?: boolean;
-  /** UI-only: account note from DB before user edits (inbound lookup). */
-  existingAccountNote?: string | null;
 }
 
 export interface FifoNoteEntry {
