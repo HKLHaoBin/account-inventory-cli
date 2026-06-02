@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Callable
 
@@ -46,9 +47,12 @@ def classify_inbound_line(
     *,
     exists_in_inventory: Callable[[str], bool],
     exists_in_outbound: Callable[[str], bool],
+    separators: Sequence[str] | None = None,
 ) -> InboundReady | InboundPending | InboundFailure:
     try:
-        username, password, email, email_password, url = parse_account_line(line)
+        username, password, email, email_password, url = parse_account_line(
+            line, separators
+        )
     except ValueError as exc:
         return InboundFailure(line=line, reason=str(exc))
 
@@ -100,9 +104,12 @@ def classify_outbound_line(
     *,
     exists_in_inventory: Callable[[str], bool],
     exists_in_outbound: Callable[[str], bool],
+    separators: Sequence[str] | None = None,
 ) -> OutboundReady | OutboundFailure:
     try:
-        username, password, email, email_password, url = parse_account_line(line)
+        username, password, email, email_password, url = parse_account_line(
+            line, separators
+        )
     except ValueError as exc:
         return OutboundFailure(line=line, reason=str(exc))
 

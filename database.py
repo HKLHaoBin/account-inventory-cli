@@ -176,6 +176,37 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+_BUILTIN_DEFAULT_RULE_ID = "builtin-default"
+
+
+def _migrate_separator_rules(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS separator_rules (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            separator TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            built_in INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_separator_rules_separator
+            ON separator_rules(separator);
+        """
+    )
+    count = conn.execute("SELECT COUNT(*) AS n FROM separator_rules").fetchone()["n"]
+    if count == 0:
+        conn.execute(
+            """
+            INSERT INTO separator_rules (
+                id, name, separator, enabled, built_in, sort_order, created_at
+            ) VALUES (?, ?, ?, 1, 1, 0, ?)
+            """,
+            (_BUILTIN_DEFAULT_RULE_ID, "默认规则", "----", _now_iso()),
+        )
+
+
 def _migrate_inbound_history(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -306,6 +337,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     )
     _migrate_add_url_column(conn)
     _migrate_inbound_history(conn)
+    _migrate_separator_rules(conn)
 
 
 def _init_database_file(record: dict[str, Any]) -> None:
@@ -1238,3 +1270,200 @@ def count_inbound_records() -> int:
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM inbound_records").fetchone()
         return int(row["n"])
+
+
+def _row_to_separator_rule(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "separator": row["separator"],
+        "enabled": bool(row["enabled"]),
+        "built_in": bool(row["built_in"]),
+        "sort_order": row["sort_order"],
+        "created_at": row["created_at"],
+    }
+
+
+def _validate_separator_rule_name(name: str) -> str:
+    value = name.strip()
+    if not value:
+        raise ValueError("规则名称不能为空")
+    if len(value) > 40:
+        raise ValueError("规则名称不能超过 40 个字符")
+    return value
+
+
+def _validate_separator_rule_separator(separator: str) -> str:
+    value = separator.strip()
+    if not value:
+        raise ValueError("分隔符不能为空")
+    if "\n" in value or "\r" in value:
+        raise ValueError("分隔符不能包含换行符")
+    if len(value) > 20:
+        raise ValueError("分隔符长度不能超过 20 个字符")
+    return value
+
+
+def _count_enabled_separator_rules(
+    conn: sqlite3.Connection,
+    *,
+    exclude_id: str | None = None,
+) -> int:
+    if exclude_id:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM separator_rules
+            WHERE enabled = 1 AND id != ?
+            """,
+            (exclude_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM separator_rules WHERE enabled = 1"
+        ).fetchone()
+    return int(row["n"])
+
+
+def list_separator_rules() -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, separator, enabled, built_in, sort_order, created_at
+            FROM separator_rules
+            ORDER BY sort_order ASC, created_at ASC
+            """
+        ).fetchall()
+    return [_row_to_separator_rule(row) for row in rows]
+
+
+def list_enabled_separators() -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT separator
+            FROM separator_rules
+            WHERE enabled = 1
+            ORDER BY sort_order ASC, created_at ASC
+            """
+        ).fetchall()
+    return [row["separator"] for row in rows]
+
+
+def create_separator_rule(name: str, separator: str) -> dict[str, Any]:
+    validated_name = _validate_separator_rule_name(name)
+    validated_separator = _validate_separator_rule_separator(separator)
+    rule_id = uuid.uuid4().hex
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM separator_rules WHERE separator = ? LIMIT 1",
+            (validated_separator,),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(f"分隔符「{validated_separator}」已存在")
+        max_order = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS m FROM separator_rules"
+        ).fetchone()["m"]
+        now = _now_iso()
+        conn.execute(
+            """
+            INSERT INTO separator_rules (
+                id, name, separator, enabled, built_in, sort_order, created_at
+            ) VALUES (?, ?, ?, 1, 0, ?, ?)
+            """,
+            (rule_id, validated_name, validated_separator, int(max_order) + 1, now),
+        )
+        row = conn.execute(
+            """
+            SELECT id, name, separator, enabled, built_in, sort_order, created_at
+            FROM separator_rules
+            WHERE id = ?
+            """,
+            (rule_id,),
+        ).fetchone()
+    return _row_to_separator_rule(row)
+
+
+def update_separator_rule(
+    rule_id: str,
+    *,
+    name: str | None = None,
+    separator: str | None = None,
+    enabled: bool | None = None,
+) -> dict[str, Any]:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, name, separator, enabled, built_in, sort_order, created_at
+            FROM separator_rules
+            WHERE id = ?
+            """,
+            (rule_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("分隔规则不存在")
+
+        new_name = (
+            _validate_separator_rule_name(name) if name is not None else row["name"]
+        )
+        new_separator = (
+            _validate_separator_rule_separator(separator)
+            if separator is not None
+            else row["separator"]
+        )
+        new_enabled = enabled if enabled is not None else bool(row["enabled"])
+
+        if separator is not None and new_separator != row["separator"]:
+            duplicate = conn.execute(
+                """
+                SELECT 1
+                FROM separator_rules
+                WHERE separator = ? AND id != ?
+                LIMIT 1
+                """,
+                (new_separator, rule_id),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(f"分隔符「{new_separator}」已存在")
+
+        if not new_enabled:
+            if _count_enabled_separator_rules(conn, exclude_id=rule_id) == 0:
+                raise ValueError("至少需要保留一条启用的分隔规则")
+
+        conn.execute(
+            """
+            UPDATE separator_rules
+            SET name = ?, separator = ?, enabled = ?
+            WHERE id = ?
+            """,
+            (new_name, new_separator, int(new_enabled), rule_id),
+        )
+        updated = conn.execute(
+            """
+            SELECT id, name, separator, enabled, built_in, sort_order, created_at
+            FROM separator_rules
+            WHERE id = ?
+            """,
+            (rule_id,),
+        ).fetchone()
+    return _row_to_separator_rule(updated)
+
+
+def delete_separator_rule(rule_id: str) -> None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, name, separator, enabled, built_in, sort_order, created_at
+            FROM separator_rules
+            WHERE id = ?
+            """,
+            (rule_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("分隔规则不存在")
+        if row["built_in"]:
+            raise ValueError("不能删除内置分隔规则")
+        if row["enabled"]:
+            if _count_enabled_separator_rules(conn, exclude_id=rule_id) == 0:
+                raise ValueError("至少需要保留一条启用的分隔规则")
+        conn.execute("DELETE FROM separator_rules WHERE id = ?", (rule_id,))

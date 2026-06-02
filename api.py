@@ -257,6 +257,42 @@ class OutboundByUsernamePayload(BaseModel):
     clipboardText: str
 
 
+class SeparatorRulePayload(BaseModel):
+    id: str
+    name: str
+    separator: str
+    enabled: bool
+    builtIn: bool
+    createdAt: str
+
+
+class CreateSeparatorRuleRequest(BaseModel):
+    name: str
+    separator: str
+
+
+class UpdateSeparatorRuleRequest(BaseModel):
+    name: str | None = None
+    separator: str | None = None
+    enabled: bool | None = None
+
+
+class SeparatorRuleListPayload(BaseModel):
+    rules: list[SeparatorRulePayload]
+
+
+def _enabled_separators() -> list[str]:
+    return db.list_enabled_separators()
+
+
+def _parse_line(line: str):
+    return parse_account_line(line, _enabled_separators())
+
+
+def _extract_valid_lines(text: str):
+    return extract_valid_account_lines(text, _enabled_separators())
+
+
 def _account_payload(row: dict) -> AccountPayload:
     return AccountPayload(
         id=str(row["id"]),
@@ -371,6 +407,17 @@ def _database_payload(row: dict) -> DatabaseInfoPayload:
     )
 
 
+def _separator_rule_payload(row: dict) -> SeparatorRulePayload:
+    return SeparatorRulePayload(
+        id=row["id"],
+        name=row["name"],
+        separator=row["separator"],
+        enabled=bool(row["enabled"]),
+        builtIn=bool(row["built_in"]),
+        createdAt=row["created_at"],
+    )
+
+
 def _parse_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
@@ -381,7 +428,7 @@ def _preview_rows_from_lines(lines: list[str]) -> list[InboundPreviewRow]:
 
     for line in lines:
         try:
-            parsed = parse_account_line(line)
+            parsed = _parse_line(line)
         except ValueError:
             continue
         parsed_by_line[line] = parsed
@@ -398,7 +445,7 @@ def _preview_rows_from_lines(lines: list[str]) -> list[InboundPreviewRow]:
         try:
             username, password, email, email_password, url = parsed_by_line.get(
                 line
-            ) or parse_account_line(line)
+            ) or _parse_line(line)
         except ValueError as exc:
             rows.append(
                 InboundPreviewRow(
@@ -530,6 +577,50 @@ def delete_database(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/separator-rules", response_model=SeparatorRuleListPayload)
+def get_separator_rules() -> SeparatorRuleListPayload:
+    return SeparatorRuleListPayload(
+        rules=[_separator_rule_payload(row) for row in db.list_separator_rules()]
+    )
+
+
+@app.post("/api/separator-rules", response_model=SeparatorRulePayload)
+def create_separator_rule(payload: CreateSeparatorRuleRequest) -> SeparatorRulePayload:
+    try:
+        return _separator_rule_payload(
+            db.create_separator_rule(payload.name, payload.separator)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/api/separator-rules/{rule_id}", response_model=SeparatorRulePayload)
+def update_separator_rule(
+    rule_id: str,
+    payload: UpdateSeparatorRuleRequest,
+) -> SeparatorRulePayload:
+    try:
+        return _separator_rule_payload(
+            db.update_separator_rule(
+                rule_id,
+                name=payload.name,
+                separator=payload.separator,
+                enabled=payload.enabled,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/separator-rules/{rule_id}")
+def delete_separator_rule(rule_id: str) -> dict[str, bool]:
+    try:
+        db.delete_separator_rule(rule_id)
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/inventory", response_model=InventoryPayload)
 def get_inventory() -> InventoryPayload:
     return InventoryPayload(
@@ -644,7 +735,7 @@ def commit_inbound(payload: InboundCommitRequest) -> InboundCommitPayload:
     parsed_usernames: list[str] = []
     for item in payload.rows:
         try:
-            parsed_usernames.append(parse_account_line(item.line)[0])
+            parsed_usernames.append(_parse_line(item.line)[0])
         except ValueError:
             continue
 
@@ -656,7 +747,7 @@ def commit_inbound(payload: InboundCommitRequest) -> InboundCommitPayload:
 
     for item in payload.rows:
         try:
-            username, password, email, email_password, url = parse_account_line(item.line)
+            username, password, email, email_password, url = _parse_line(item.line)
         except ValueError as exc:
             results.append(
                 InboundCommitResultRow(
@@ -808,7 +899,7 @@ def commit_outbound_paste(
             continue
 
         try:
-            username, password, email, email_password, url = parse_account_line(line)
+            username, password, email, email_password, url = _parse_line(line)
         except ValueError as exc:
             immediate_results[item.clientId] = OutboundPasteResultRow(
                 clientId=item.clientId,
@@ -916,7 +1007,7 @@ async def clipboard_socket(websocket: WebSocket) -> None:
                 and text != last_seen
                 and text != _ignored_clipboard_text
             ):
-                valid_lines, rejected_count = extract_valid_account_lines(text)
+                valid_lines, rejected_count = _extract_valid_lines(text)
                 if valid_lines:
                     normalized = "\n".join(valid_lines)
                     await websocket.send_json(

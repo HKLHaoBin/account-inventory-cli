@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 
-def parse_account_line(line: str) -> tuple[str, str, str | None, str | None, str | None]:
+DEFAULT_SEPARATORS = ["----"]
+
+
+def _parse_with_separator(
+    line: str,
+    separator: str,
+) -> tuple[str, str, str | None, str | None, str | None]:
     """Parse account----password----email----email_password----url (2-5 fields)."""
     stripped = line.strip()
     if not stripped:
         raise ValueError("输入不能为空")
 
-    parts = [p.strip() for p in stripped.split("----")]
+    parts = [p.strip() for p in stripped.split(separator)]
     if len(parts) < 2:
         raise ValueError("格式错误：至少需要「账号----密码」两段")
     if len(parts) > 5:
@@ -41,7 +48,31 @@ def parse_account_line(line: str) -> tuple[str, str, str | None, str | None, str
     return username, password, email, email_password, url
 
 
-def extract_valid_account_lines(text: str) -> tuple[list[str], int]:
+def parse_account_line(
+    line: str,
+    separators: Sequence[str] | None = None,
+) -> tuple[str, str, str | None, str | None, str | None]:
+    seps = list(separators) if separators else DEFAULT_SEPARATORS
+    if not seps:
+        raise ValueError("输入不能为空")
+
+    last_error: ValueError | None = None
+    for separator in seps:
+        try:
+            return _parse_with_separator(line, separator)
+        except ValueError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError("输入不能为空")
+
+
+def extract_valid_account_lines(
+    text: str,
+    separators: Sequence[str] | None = None,
+) -> tuple[list[str], int]:
     """Return (valid_lines, rejected_count). One entry per kept line."""
     valid: list[str] = []
     rejected = 0
@@ -51,7 +82,7 @@ def extract_valid_account_lines(text: str) -> tuple[list[str], int]:
             rejected += 1
             continue
         try:
-            parse_account_line(stripped)
+            parse_account_line(stripped, separators)
         except ValueError:
             rejected += 1
             continue

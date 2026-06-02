@@ -12,8 +12,10 @@ import {
   Monitor,
   Moon,
   RefreshCw,
+  Scissors,
   ShieldCheck,
   Sun,
+  Trash2,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,14 +25,22 @@ import { APP_NAME, APP_VERSION, DB_PATH, SHORTCUTS } from "@/lib/constants";
 import {
   checkForUpdate,
   cloneDatabase,
+  createSeparatorRule,
   deleteDatabase,
+  deleteSeparatorRule,
   fetchDashboard,
+  fetchSeparatorRules,
   fetchUpdateStatus,
   renameDatabase,
   triggerUpdate,
+  updateSeparatorRule,
 } from "@/lib/api";
 import { emitDatabaseChanged, subscribeDatabaseChanged } from "@/lib/database-events";
-import type { DatabaseInfo, UpdateStatusPayload } from "@/types/account";
+import {
+  emitSeparatorRulesChanged,
+  subscribeSeparatorRulesChanged,
+} from "@/lib/separator-rules-events";
+import type { DatabaseInfo, SeparatorRule, UpdateStatusPayload } from "@/types/account";
 
 function statusTone(state?: string) {
   if (state === "updated" || state === "idle") return "text-emerald-600";
@@ -90,6 +100,13 @@ export default function SettingsPage() {
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneName, setCloneName] = useState("");
   const [cloningDatabase, setCloningDatabase] = useState(false);
+  const [separatorRules, setSeparatorRules] = useState<SeparatorRule[]>([]);
+  const [separatorRulesError, setSeparatorRulesError] = useState("");
+  const [newRuleName, setNewRuleName] = useState("");
+  const [newRuleSeparator, setNewRuleSeparator] = useState("");
+  const [addingRule, setAddingRule] = useState(false);
+  const [updatingRuleId, setUpdatingRuleId] = useState<string | null>(null);
+  const [deletingRuleId, setDeletingRuleId] = useState<string | null>(null);
 
   const refreshUpdateStatus = useCallback(async () => {
     try {
@@ -112,21 +129,43 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const refreshSeparatorRules = useCallback(async () => {
+    try {
+      const rules = await fetchSeparatorRules();
+      setSeparatorRules(rules);
+      setSeparatorRulesError("");
+    } catch (error) {
+      setSeparatorRulesError(
+        error instanceof Error ? error.message : "分隔规则读取失败"
+      );
+    }
+  }, []);
+
   useEffect(() => {
     const mountTimer = window.setTimeout(() => setMounted(true), 0);
     const statusTimer = window.setTimeout(() => {
       void refreshUpdateStatus();
       void refreshDatabase();
+      void refreshSeparatorRules();
     }, 0);
     return () => {
       window.clearTimeout(mountTimer);
       window.clearTimeout(statusTimer);
     };
-  }, [refreshDatabase, refreshUpdateStatus]);
+  }, [refreshDatabase, refreshSeparatorRules, refreshUpdateStatus]);
 
   useEffect(
-    () => subscribeDatabaseChanged(() => void refreshDatabase()),
-    [refreshDatabase]
+    () =>
+      subscribeDatabaseChanged(() => {
+        void refreshDatabase();
+        void refreshSeparatorRules();
+      }),
+    [refreshDatabase, refreshSeparatorRules]
+  );
+
+  useEffect(
+    () => subscribeSeparatorRulesChanged(() => void refreshSeparatorRules()),
+    [refreshSeparatorRules]
   );
 
   useEffect(() => {
@@ -232,6 +271,62 @@ export default function SettingsPage() {
       setDatabaseError(error instanceof Error ? error.message : "数据库克隆失败");
     } finally {
       setCloningDatabase(false);
+    }
+  }
+
+  async function handleAddSeparatorRule() {
+    const name = newRuleName.trim();
+    const separator = newRuleSeparator.trim();
+    if (!name || !separator) {
+      setSeparatorRulesError("规则名称和分隔符不能为空");
+      return;
+    }
+    setAddingRule(true);
+    try {
+      await createSeparatorRule(name, separator);
+      setNewRuleName("");
+      setNewRuleSeparator("");
+      setSeparatorRulesError("");
+      await refreshSeparatorRules();
+      emitSeparatorRulesChanged();
+    } catch (error) {
+      setSeparatorRulesError(
+        error instanceof Error ? error.message : "添加分隔规则失败"
+      );
+    } finally {
+      setAddingRule(false);
+    }
+  }
+
+  async function handleToggleSeparatorRule(rule: SeparatorRule) {
+    setUpdatingRuleId(rule.id);
+    try {
+      await updateSeparatorRule(rule.id, { enabled: !rule.enabled });
+      setSeparatorRulesError("");
+      await refreshSeparatorRules();
+      emitSeparatorRulesChanged();
+    } catch (error) {
+      setSeparatorRulesError(
+        error instanceof Error ? error.message : "更新分隔规则失败"
+      );
+    } finally {
+      setUpdatingRuleId(null);
+    }
+  }
+
+  async function handleDeleteSeparatorRule(ruleId: string) {
+    setDeletingRuleId(ruleId);
+    try {
+      await deleteSeparatorRule(ruleId);
+      setSeparatorRulesError("");
+      await refreshSeparatorRules();
+      emitSeparatorRulesChanged();
+    } catch (error) {
+      setSeparatorRulesError(
+        error instanceof Error ? error.message : "删除分隔规则失败"
+      );
+    } finally {
+      setDeletingRuleId(null);
     }
   }
 
@@ -447,6 +542,103 @@ export default function SettingsPage() {
               删除后会自动切换到其他数据库；若没有剩余数据库，会创建新的空默认数据库。
             </p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Scissors className="h-4 w-4" />
+            分隔规则
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            输入解析使用当前数据库已启用的分隔符；复制与展示仍统一为
+            <span className="font-mono text-foreground"> ---- </span>
+            格式。
+          </p>
+          {separatorRules.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+              {separatorRulesError ? "读取失败" : "加载分隔规则中…"}
+            </p>
+          ) : (
+            <div className="divide-y divide-border rounded-xl border border-border">
+              {separatorRules.map((rule) => (
+                <div
+                  key={rule.id}
+                  className="flex flex-col gap-3 px-4 py-3 first:pt-3 last:pb-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-sm font-medium text-foreground">
+                      {rule.builtIn ? "默认规则" : rule.name}
+                    </p>
+                    <p className="font-mono text-xs text-muted-foreground">
+                      {rule.separator}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3">
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-border"
+                        checked={rule.enabled}
+                        disabled={
+                          updatingRuleId === rule.id || deletingRuleId === rule.id
+                        }
+                        onChange={() => void handleToggleSeparatorRule(rule)}
+                      />
+                      启用
+                    </label>
+                    {!rule.builtIn && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        disabled={
+                          deletingRuleId === rule.id || updatingRuleId === rule.id
+                        }
+                        onClick={() => void handleDeleteSeparatorRule(rule.id)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        删除
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="space-y-2 border-t border-border pt-4">
+            <p className="text-sm font-medium">添加规则</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Input
+                value={newRuleName}
+                onChange={(event) => setNewRuleName(event.target.value)}
+                placeholder="规则名称"
+              />
+              <Input
+                value={newRuleSeparator}
+                onChange={(event) => setNewRuleSeparator(event.target.value)}
+                placeholder="分隔符，例如 ::::"
+                className="font-mono"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={() => void handleAddSeparatorRule()}
+              disabled={
+                addingRule || !newRuleName.trim() || !newRuleSeparator.trim()
+              }
+            >
+              添加规则
+            </Button>
+          </div>
+          {separatorRulesError && (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              {separatorRulesError}
+            </div>
+          )}
         </CardContent>
       </Card>
 

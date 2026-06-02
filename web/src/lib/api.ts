@@ -19,6 +19,8 @@ import type {
   OutboundPasteRow,
   SearchPayload,
   SearchResult,
+  SeparatorRule,
+  SeparatorRuleListPayload,
   UpdateStatusPayload,
 } from "@/types/account";
 import {
@@ -98,6 +100,39 @@ export function deleteDatabase(
     headers: {
       "X-Update-Token": token,
     },
+  });
+}
+
+export async function fetchSeparatorRules(): Promise<SeparatorRule[]> {
+  const payload = await requestJson<SeparatorRuleListPayload>(
+    "/api/separator-rules"
+  );
+  return payload.rules;
+}
+
+export function createSeparatorRule(
+  name: string,
+  separator: string
+): Promise<SeparatorRule> {
+  return requestJson<SeparatorRule>("/api/separator-rules", {
+    method: "POST",
+    body: JSON.stringify({ name, separator }),
+  });
+}
+
+export function updateSeparatorRule(
+  ruleId: string,
+  patch: { name?: string; separator?: string; enabled?: boolean }
+): Promise<SeparatorRule> {
+  return requestJson<SeparatorRule>(`/api/separator-rules/${ruleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteSeparatorRule(ruleId: string): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>(`/api/separator-rules/${ruleId}`, {
+    method: "DELETE",
   });
 }
 

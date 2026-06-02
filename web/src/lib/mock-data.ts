@@ -221,6 +221,7 @@ export function getOutboundTimes(): Map<string, string> {
   return map;
 }
 
+// 示例仍使用默认分隔符 ----；实际解析遵循当前数据库已启用的分隔规则
 export const SAMPLE_FORMAT = `账号----密码----邮箱----邮箱密码----网址
 alpha_user01----Pass@2026a----alpha01@mail.example.com----MailPass01!----https://platform.example.com/login
 beta_test02----Beta#Secure2----beta02@corp.net----CorpMail02`;

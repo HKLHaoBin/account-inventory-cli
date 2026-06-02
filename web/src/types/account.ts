@@ -248,6 +248,19 @@ export interface ClipboardMessage {
   rejectedCount: number;
 }
 
+export interface SeparatorRule {
+  id: string;
+  name: string;
+  separator: string;
+  enabled: boolean;
+  builtIn: boolean;
+  createdAt: string;
+}
+
+export interface SeparatorRuleListPayload {
+  rules: SeparatorRule[];
+}
+
 export interface UpdateStatusPayload {
   timestamp: string;
   state: string;

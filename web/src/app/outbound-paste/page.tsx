@@ -18,6 +18,7 @@ import {
 } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
+import { useSeparatorRules } from "@/lib/use-separator-rules";
 import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
 import { cn, maskValue } from "@/lib/utils";
 import type {
@@ -54,11 +55,11 @@ function rowTone(row: OutboundPasteRow) {
   return "bg-muted/20";
 }
 
-function buildDraftRows(text: string): OutboundPasteRow[] {
+function buildDraftRows(text: string, separators: string[]): OutboundPasteRow[] {
   return parseLines(text).map((line, index) => {
     const clientId = `line-${index + 1}`;
     try {
-      const account = parseAccountLine(line);
+      const account = parseAccountLine(line, separators);
       return {
         clientId,
         line,
@@ -89,6 +90,9 @@ export default function OutboundPastePage() {
   const wsTimerRef = useRef<number | null>(null);
   const textRef = useRef("");
   const resultRowsRef = useRef<Map<string, OutboundPasteRow>>(new Map());
+  const { enabledSeparators, loading: rulesLoading, error: rulesError } =
+    useSeparatorRules();
+  const rulesReady = !rulesLoading && !rulesError;
   const [text, setText] = useState("");
   const [draftRows, setDraftRows] = useState<OutboundPasteRow[]>([]);
   const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
@@ -103,11 +107,11 @@ export default function OutboundPastePage() {
     textRef.current = value;
     resultRowsRef.current = new Map();
     setText(value);
-    setDraftRows(buildDraftRows(value));
+    setDraftRows(rulesReady ? buildDraftRows(value, enabledSeparators) : []);
     setDeletedIds(new Set());
     setResultRows(new Map());
     setMessage("");
-  }, []);
+  }, [enabledSeparators, rulesReady]);
 
   const appendText = useCallback((value: string) => {
     const nextValue = value.trim();
@@ -163,6 +167,11 @@ export default function OutboundPastePage() {
       }),
     [resetForText]
   );
+
+  useEffect(() => {
+    if (!textRef.current || !rulesReady) return;
+    setDraftRows(buildDraftRows(textRef.current, enabledSeparators));
+  }, [enabledSeparators, rulesReady]);
 
   const displayedRows = useMemo(
     () =>
@@ -231,6 +240,12 @@ export default function OutboundPastePage() {
           批量粘贴账号，确认后统一检测状态并出库
         </p>
         <p className="mt-1 text-xs text-muted-foreground">{clipboardState}</p>
+        {rulesLoading && (
+          <p className="mt-1 text-xs text-muted-foreground">加载分隔规则中…</p>
+        )}
+        {rulesError && (
+          <p className="mt-1 text-xs text-red-600">{rulesError}</p>
+        )}
       </div>
 
       <Card>
@@ -258,7 +273,7 @@ export default function OutboundPastePage() {
           <Textarea
             value={text}
             onChange={(event) => resetForText(event.target.value)}
-            placeholder="粘贴要出库的账号行，每行一条"
+            placeholder="使用已启用分隔规则，示例：账号----密码----邮箱----邮箱密码----网址"
             className="min-h-[180px] font-mono text-xs"
           />
 
@@ -340,7 +355,10 @@ export default function OutboundPastePage() {
       </Card>
 
       <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-card p-4 shadow-sm">
-        <Button onClick={handleConfirm} disabled={busy || commitRows.length === 0}>
+        <Button
+          onClick={handleConfirm}
+          disabled={busy || commitRows.length === 0 || rulesLoading || !!rulesError}
+        >
           <Check className="h-4 w-4" />
           确认出库 ({commitRows.length})
         </Button>

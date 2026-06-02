@@ -31,6 +31,7 @@ import { downloadTextFile } from "@/lib/download";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
 import { isClipboardMessage, getClipboardWsUrl } from "@/lib/ws";
 import { parseAccountLine, parseLines } from "@/lib/parser";
+import { useSeparatorRules } from "@/lib/use-separator-rules";
 import { cn, formatDateTime, formatRelativeTime, maskValue } from "@/lib/utils";
 import type {
   Account,
@@ -125,11 +126,11 @@ function AccountCell({ value }: { value?: string | null }) {
   return <span className="font-mono text-xs">{value}</span>;
 }
 
-function buildDraftRows(text: string): InboundPreviewRow[] {
+function buildDraftRows(text: string, separators: string[]): InboundPreviewRow[] {
   return parseLines(text).map((line, index) => {
     const clientId = `line-${index + 1}`;
     try {
-      const account = parseAccountLine(line);
+      const account = parseAccountLine(line, separators);
       return {
         clientId,
         line,
@@ -281,6 +282,9 @@ export default function DashboardPage() {
   const resultRowsRef = useRef<Map<string, InboundCommitResultRow>>(new Map());
   const inboundTextareaRef = useRef<HTMLTextAreaElement>(null);
   const fifoQuantityRef = useRef<HTMLInputElement>(null);
+  const { enabledSeparators, loading: rulesLoading, error: rulesError } =
+    useSeparatorRules();
+  const rulesReady = !rulesLoading && !rulesError;
   const [dashboard, setDashboard] = useState<DashboardPayload>(EMPTY_DASHBOARD);
   const [dashboardError, setDashboardError] = useState("");
   const [text, setText] = useState("");
@@ -306,20 +310,20 @@ export default function DashboardPage() {
   const [fifoBusy, setFifoBusy] = useState(false);
   const [fifoMessage, setFifoMessage] = useState("");
 
-  function replaceInboundText(value: string) {
+  const replaceInboundText = useCallback((value: string) => {
     inboundTextRef.current = value;
     resultRowsRef.current = new Map();
     setText(value);
-    setPreviewRows(buildDraftRows(value));
+    setPreviewRows(rulesReady ? buildDraftRows(value, enabledSeparators) : []);
     setDeletedIds(new Set());
     setPendingCursorId(null);
     setApprovedPendingIds(new Set());
     setResultRows(new Map());
     setPreviewError("");
     setKeyboardMessage("");
-  }
+  }, [enabledSeparators, rulesReady]);
 
-  function appendInboundText(value: string) {
+  const appendInboundText = useCallback((value: string) => {
     const nextValue = value.trim();
     if (!nextValue) return;
     const currentValue = inboundTextRef.current.trimEnd();
@@ -327,10 +331,10 @@ export default function DashboardPage() {
     inboundTextRef.current = mergedValue;
     resultRowsRef.current = new Map();
     setText(mergedValue);
-    setPreviewRows(buildDraftRows(mergedValue));
+    setPreviewRows(rulesReady ? buildDraftRows(mergedValue, enabledSeparators) : []);
     setResultRows(new Map());
     setPreviewError("");
-  }
+  }, [enabledSeparators, rulesReady]);
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -355,6 +359,11 @@ export default function DashboardPage() {
     () => subscribeDatabaseChanged(() => void loadDashboard()),
     [loadDashboard]
   );
+
+  useEffect(() => {
+    if (!inboundTextRef.current || !rulesReady) return;
+    setPreviewRows(buildDraftRows(inboundTextRef.current, enabledSeparators));
+  }, [enabledSeparators, rulesReady]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -400,7 +409,7 @@ export default function DashboardPage() {
       if (wsTimerRef.current !== null) window.clearTimeout(wsTimerRef.current);
       socket?.close();
     };
-  }, []);
+  }, [appendInboundText, replaceInboundText]);
 
   useEffect(() => {
     let ignore = false;
@@ -495,7 +504,7 @@ export default function DashboardPage() {
     inboundTextRef.current = value;
     resultRowsRef.current = new Map();
     setText(value);
-    setPreviewRows(buildDraftRows(value));
+    setPreviewRows(rulesReady ? buildDraftRows(value, enabledSeparators) : []);
     setDeletedIds(new Set());
     setPendingCursorId(null);
     setApprovedPendingIds(new Set());
@@ -736,6 +745,12 @@ export default function DashboardPage() {
               <p className="mt-1 truncate text-xs text-muted-foreground sm:whitespace-normal">
                 {clipboardState}
               </p>
+              {rulesLoading && (
+                <p className="mt-1 text-xs text-muted-foreground">加载分隔规则中…</p>
+              )}
+              {rulesError && (
+                <p className="mt-1 text-xs text-red-600">{rulesError}</p>
+              )}
               <p className="mt-1 hidden text-xs text-muted-foreground md:block">
                 I 聚焦输入 · ↑↓ 移动待确认 · Space/Enter 切换 · Y 批准 · N 取消 · Esc 取消未批准
               </p>
@@ -779,7 +794,7 @@ export default function DashboardPage() {
                   void handleInboundCommit();
                 }
               }}
-              placeholder="每行一条：账号----密码----邮箱----邮箱密码----网址"
+              placeholder="使用已启用分隔规则，示例：账号----密码----邮箱----邮箱密码----网址"
               className="min-h-[150px] font-mono text-xs"
             />
 
@@ -800,7 +815,9 @@ export default function DashboardPage() {
               <Button
                 className="w-full sm:w-auto"
                 onClick={handleInboundCommit}
-                disabled={inboundBusy || commitRows.length === 0}
+                disabled={
+                  inboundBusy || commitRows.length === 0 || rulesLoading || !!rulesError
+                }
               >
                 <Check className="h-4 w-4" />
                 确认入库 ({approvedReadyCount})

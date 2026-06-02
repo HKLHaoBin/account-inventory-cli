@@ -19,12 +19,13 @@ interface OutboundContext {
 
 export function classifyInboundLines(
   lines: string[],
-  ctx: InboundContext
+  ctx: InboundContext,
+  separators?: string[]
 ): ClassifiedInboundLine[] {
   const seen = new Set<string>();
   return lines.map((line) => {
     try {
-      const account = parseAccountLine(line);
+      const account = parseAccountLine(line, separators);
       const { username } = account;
 
       if (ctx.inventoryUsernames.has(username)) {
@@ -68,12 +69,13 @@ export function classifyInboundLines(
 
 export function classifyOutboundLines(
   lines: string[],
-  ctx: OutboundContext
+  ctx: OutboundContext,
+  separators?: string[]
 ): ClassifiedOutboundLine[] {
   const seen = new Set<string>();
   return lines.map((line) => {
     try {
-      const account = parseAccountLine(line);
+      const account = parseAccountLine(line, separators);
       const { username } = account;
 
       if (seen.has(username)) {

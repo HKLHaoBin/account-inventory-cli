@@ -893,6 +893,144 @@ def test_database_clone_copies_data_and_stays_independent() -> None:
     db.delete_database(cloned["id"])
 
 
+def test_separator_rules_default() -> None:
+    rules = db.list_separator_rules()
+    assert len(rules) >= 1
+    default = next(rule for rule in rules if rule["id"] == "builtin-default")
+    assert default["name"] == "默认规则"
+    assert default["separator"] == "----"
+    assert default["enabled"] is True
+    assert default["built_in"] is True
+    assert db.list_enabled_separators() == ["----"]
+
+
+def test_separator_rules_crud_validation() -> None:
+    try:
+        db.create_separator_rule("重复", "----")
+        raise AssertionError("expected duplicate separator error")
+    except ValueError:
+        pass
+
+    try:
+        db.create_separator_rule("   ", "::::")
+        raise AssertionError("expected empty name error")
+    except ValueError:
+        pass
+
+    try:
+        db.create_separator_rule("换行", "a\nb")
+        raise AssertionError("expected newline separator error")
+    except ValueError:
+        pass
+
+    try:
+        db.create_separator_rule("超长", "x" * 21)
+        raise AssertionError("expected separator too long error")
+    except ValueError:
+        pass
+
+    custom = db.create_separator_rule("自定义", "::::")
+    assert custom["enabled"] is True
+    assert custom["built_in"] is False
+
+    try:
+        db.create_separator_rule("重复2", "::::")
+        raise AssertionError("expected duplicate separator error")
+    except ValueError:
+        pass
+
+    try:
+        db.delete_separator_rule("builtin-default")
+        raise AssertionError("expected cannot delete builtin error")
+    except ValueError:
+        pass
+
+    db.update_separator_rule(custom["id"], enabled=False)
+    try:
+        db.update_separator_rule("builtin-default", enabled=False)
+        raise AssertionError("expected cannot disable last enabled rule")
+    except ValueError:
+        pass
+
+    db.update_separator_rule(custom["id"], enabled=True)
+    db.update_separator_rule(custom["id"], enabled=False)
+    db.delete_separator_rule(custom["id"])
+
+    only_custom = db.create_separator_rule("唯一", "::::")
+    db.update_separator_rule("builtin-default", enabled=False)
+    try:
+        db.delete_separator_rule(only_custom["id"])
+        raise AssertionError("expected cannot delete last enabled rule")
+    except ValueError:
+        pass
+    try:
+        db.update_separator_rule(only_custom["id"], enabled=False)
+        raise AssertionError("expected cannot disable last enabled rule")
+    except ValueError:
+        pass
+
+    db.update_separator_rule("builtin-default", enabled=True)
+    db.update_separator_rule(only_custom["id"], enabled=False)
+    db.delete_separator_rule(only_custom["id"])
+
+
+def test_parse_multi_separator() -> None:
+    u, p, _, _, _ = parse_account_line("user::::pass", ["::::"])
+    assert u == "user"
+    assert p == "pass"
+
+    u2, p2, _, _, _ = parse_account_line("user::::pass", ["----", "::::"])
+    assert u2 == "user"
+    assert p2 == "pass"
+
+    u3, p3, _, _, _ = parse_account_line("a----b", ["::::", "----"])
+    assert u3 == "a"
+    assert p3 == "b"
+
+    try:
+        parse_account_line("a----b", ["::::"])
+        raise AssertionError("expected parse failure without ----")
+    except ValueError:
+        pass
+
+
+def test_output_stays_default_separator() -> None:
+    _reset_inventory()
+    u, p, e, ep, url = parse_account_line("user::::pass", ["::::"])
+    db.insert_account(u, p, e, ep, url)
+    text = format_account(u, p, e, ep, url)
+    assert "::::" not in text
+    assert text == "user----pass"
+
+    client = _api_client()
+    response = client.post("/api/outbound/fifo/commit", json={"quantity": 1})
+    assert response.status_code == 200
+    clipboard_text = response.json()["clipboardText"]
+    assert "::::" not in clipboard_text
+    assert clipboard_text == "user----pass"
+
+
+def test_clone_copies_separator_rules() -> None:
+    _reset_inventory()
+    custom = db.create_separator_rule("克隆规则", "::::")
+    source = db.get_active_database_info()
+    source_rules = db.list_separator_rules()
+    source_enabled = db.list_enabled_separators()
+
+    cloned = db.clone_database(source["id"], "规则副本")
+    assert cloned["active"]
+    cloned_rules = db.list_separator_rules()
+    cloned_enabled = db.list_enabled_separators()
+
+    assert len(cloned_rules) == len(source_rules)
+    assert cloned_enabled == source_enabled
+    assert any(rule["separator"] == "::::" for rule in cloned_rules)
+
+    db.set_active_database(source["id"])
+    db.delete_database(cloned["id"])
+    db.delete_separator_rule(custom["id"])
+
+
 def test_process_outbound_batch_mixed() -> None:
     _reset_inventory()
     db.insert_account("in_stock", "p1")
@@ -942,6 +1080,95 @@ def _api_client():
     import api
 
     return TestClient(api.app)
+
+
+def test_api_separator_rules() -> None:
+    _reset_inventory()
+    client = _api_client()
+
+    response = client.get("/api/separator-rules")
+    assert response.status_code == 200
+    rules = response.json()["rules"]
+    assert len(rules) >= 1
+    default = next(rule for rule in rules if rule["id"] == "builtin-default")
+    assert default["separator"] == "----"
+    assert default["enabled"] is True
+
+    duplicate = client.post(
+        "/api/separator-rules",
+        json={"name": "重复", "separator": "----"},
+    )
+    assert duplicate.status_code == 400
+
+    empty_name = client.post(
+        "/api/separator-rules",
+        json={"name": "   ", "separator": "::::"},
+    )
+    assert empty_name.status_code == 400
+
+    empty_separator = client.post(
+        "/api/separator-rules",
+        json={"name": "空分隔", "separator": "   "},
+    )
+    assert empty_separator.status_code == 400
+
+    newline_separator = client.post(
+        "/api/separator-rules",
+        json={"name": "换行", "separator": "a\nb"},
+    )
+    assert newline_separator.status_code == 400
+
+    created = client.post(
+        "/api/separator-rules",
+        json={"name": "API 自定义", "separator": "::::"},
+    )
+    assert created.status_code == 200
+    created_payload = created.json()
+    assert created_payload["enabled"] is True
+    assert created_payload["builtIn"] is False
+
+    disabled = client.patch(
+        f"/api/separator-rules/{created_payload['id']}",
+        json={"enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+
+    reenabled = client.patch(
+        f"/api/separator-rules/{created_payload['id']}",
+        json={"enabled": True},
+    )
+    assert reenabled.status_code == 200
+    assert reenabled.json()["enabled"] is True
+
+    deleted = client.delete(f"/api/separator-rules/{created_payload['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json()["ok"] is True
+
+    delete_builtin = client.delete("/api/separator-rules/builtin-default")
+    assert delete_builtin.status_code == 400
+
+    only_custom = client.post(
+        "/api/separator-rules",
+        json={"name": "唯一", "separator": "::::"},
+    )
+    assert only_custom.status_code == 200
+    custom_id = only_custom.json()["id"]
+
+    disable_builtin = client.patch(
+        "/api/separator-rules/builtin-default",
+        json={"enabled": False},
+    )
+    assert disable_builtin.status_code == 200
+
+    disable_last = client.patch(
+        f"/api/separator-rules/{custom_id}",
+        json={"enabled": False},
+    )
+    assert disable_last.status_code == 400
+
+    client.patch("/api/separator-rules/builtin-default", json={"enabled": True})
+    client.delete(f"/api/separator-rules/{custom_id}")
 
 
 def test_api_inbound_preview() -> None:
@@ -2329,10 +2556,16 @@ def run_all() -> tuple[int, list[str]]:
         ("database registry existing db", test_database_registry_registers_existing_db),
         ("database create switch rename delete", test_database_create_switch_rename_and_delete),
         ("database clone copies data", test_database_clone_copies_data_and_stays_independent),
+        ("separator rules default", test_separator_rules_default),
+        ("separator rules crud validation", test_separator_rules_crud_validation),
+        ("parse multi separator", test_parse_multi_separator),
+        ("output stays default separator", test_output_stays_default_separator),
+        ("clone copies separator rules", test_clone_copies_separator_rules),
         ("process outbound batch mixed", test_process_outbound_batch_mixed),
         ("outbound paste mode stays after batch", test_outbound_paste_mode_stays_after_batch),
         ("handle entry outbound paste", test_handle_entry_outbound_paste),
         ("api inbound preview", test_api_inbound_preview),
+        ("api separator rules", test_api_separator_rules),
         ("api inbound commit", test_api_inbound_commit),
         ("api fifo preview and commit", test_api_fifo_preview_and_commit),
         ("api search inventory and history", test_api_search_inventory_and_history),

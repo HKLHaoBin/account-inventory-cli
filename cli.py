@@ -25,7 +25,7 @@ def render_home(inventory: int) -> None:
     print(f"当前库存：{inventory}")
     print()
     print("[0] 录入账号（入库 / 出库粘贴录入，多行批量，空行结束）")
-    print("    格式：账号----密码----邮箱----邮箱密码----网址")
+    print("    使用当前数据库已启用的分隔规则，示例：账号----密码----邮箱----邮箱密码----网址")
     print("    前两段必填，后三段可选")
     print()
     print("[1] 出库账号（可指定数量，FIFO，自动复制到剪贴板）")
@@ -58,13 +58,14 @@ def _read_batch_lines_or_exit(prompt: str) -> list[str] | None:
     print(prompt)
     lines: list[str] = []
     last_seen_clipboard = ""
+    separators = db.list_enabled_separators()
 
     def idle_tick() -> None:
         nonlocal last_seen_clipboard
         text = clipboard.read_text()
         if text is None or text == last_seen_clipboard or text == _last_app_clipboard:
             return
-        valid, rejected = extract_valid_account_lines(text)
+        valid, rejected = extract_valid_account_lines(text, separators)
         if not valid:
             return
         for account_line in valid:
@@ -340,10 +341,11 @@ def _copy_failure_lines_to_clipboard(
 
 
 def _process_inbound_batch(lines: list[str]) -> None:
+    separators = db.list_enabled_separators()
     parsed_usernames: list[str] = []
     for line in lines:
         try:
-            username, _, _, _, _ = parse_account_line(line)
+            username, _, _, _, _ = parse_account_line(line, separators)
             parsed_usernames.append(username)
         except ValueError:
             continue
@@ -368,6 +370,7 @@ def _process_inbound_batch(lines: list[str]) -> None:
             seen_usernames,
             exists_in_inventory=exists_in_inventory,
             exists_in_outbound=exists_in_outbound,
+            separators=separators,
         )
         if isinstance(result, InboundFailure):
             failures.append(result)
@@ -407,10 +410,11 @@ def _print_outbound_summary(success_count: int, failures: list[OutboundFailure])
 
 
 def _process_outbound_batch(lines: list[str]) -> None:
+    separators = db.list_enabled_separators()
     parsed_usernames: list[str] = []
     for line in lines:
         try:
-            username, _, _, _, _ = parse_account_line(line)
+            username, _, _, _, _ = parse_account_line(line, separators)
             parsed_usernames.append(username)
         except ValueError:
             continue
@@ -434,6 +438,7 @@ def _process_outbound_batch(lines: list[str]) -> None:
             seen_usernames,
             exists_in_inventory=exists_in_inventory,
             exists_in_outbound=exists_in_outbound,
+            separators=separators,
         )
         if isinstance(result, OutboundFailure):
             failures.append(result)
