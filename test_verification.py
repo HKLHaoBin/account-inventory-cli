@@ -1804,6 +1804,77 @@ def test_reinbound_creates_new_inbound_record() -> None:
     assert db.count_inbound_records() == 2
 
 
+def test_api_reinbound_from_history_ignores_separator_rules() -> None:
+    _reset_inventory()
+    client = _api_client()
+    custom = db.create_separator_rule("自定义", "::::")
+    db.update_separator_rule("builtin-default", enabled=False)
+    try:
+        db.insert_outbound_record("user----name", "secret", email="e@test.com")
+        record_id = db.list_outbound_history()[0]["id"]
+
+        response = client.post(f"/api/outbound/history/{record_id}/reinbound")
+
+        assert response.status_code == 200
+        assert db.exists_in_inventory("user----name")
+        assert db.count_outbound_records() == 1
+    finally:
+        db.update_separator_rule("builtin-default", enabled=True)
+        db.delete_separator_rule(custom["id"])
+
+
+def test_api_reinbound_from_history_duplicate_username() -> None:
+    _reset_inventory()
+    client = _api_client()
+    db.insert_account("dup_user", "pw1")
+    db.outbound_by_username("dup_user")
+    record_id = db.list_outbound_history()[0]["id"]
+    db.insert_account("dup_user", "pw2")
+
+    inventory_before = db.count_inventory()
+    outbound_before = db.count_outbound_records()
+    inbound_before = db.count_inbound_records()
+
+    response = client.post(f"/api/outbound/history/{record_id}/reinbound")
+
+    assert response.status_code == 400
+    assert "已在库存中" in response.json()["detail"]
+    assert db.count_inventory() == inventory_before
+    assert db.count_outbound_records() == outbound_before
+    assert db.count_inbound_records() == inbound_before
+
+
+def test_api_reinbound_from_history_preserves_outbound_and_creates_inbound() -> None:
+    _reset_inventory()
+    client = _api_client()
+    db.insert_account("rein_user", "pw1")
+    with db._connect() as conn:
+        first_inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("rein_user",),
+        ).fetchone()["inbound_record_id"]
+    db.outbound_by_username("rein_user")
+    record_id = db.list_outbound_history()[0]["id"]
+    outbound_before = db.count_outbound_records()
+
+    response = client.post(f"/api/outbound/history/{record_id}/reinbound")
+
+    assert response.status_code == 200
+    assert db.count_outbound_records() == outbound_before
+    assert db.exists_in_inventory("rein_user")
+    assert db.count_inbound_records() == 2
+    with db._connect() as conn:
+        second_inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("rein_user",),
+        ).fetchone()["inbound_record_id"]
+    assert first_inbound_id != second_inbound_id
+    outbound_rows = db.list_outbound_history()
+    assert len(outbound_rows) == 1
+    assert outbound_rows[0]["id"] == record_id
+    assert outbound_rows[0]["username"] == "rein_user"
+
+
 def test_migrate_inbound_history_backfill() -> None:
     _reset_inventory()
     with db._connect() as conn:
@@ -3009,6 +3080,18 @@ def run_all() -> tuple[int, list[str]]:
         ("inbound record created", test_inbound_record_created_on_insert),
         ("inbound persists after outbound", test_inbound_history_persists_after_outbound),
         ("reinbound new record", test_reinbound_creates_new_inbound_record),
+        (
+            "api reinbound ignores separator rules",
+            test_api_reinbound_from_history_ignores_separator_rules,
+        ),
+        (
+            "api reinbound duplicate username",
+            test_api_reinbound_from_history_duplicate_username,
+        ),
+        (
+            "api reinbound preserves outbound history",
+            test_api_reinbound_from_history_preserves_outbound_and_creates_inbound,
+        ),
         ("migrate inbound history", test_migrate_inbound_history_backfill),
         ("outbound inbound_record_id paths", test_outbound_paths_set_inbound_record_id),
         ("history filters parse dates", test_history_filters_parse_dates),

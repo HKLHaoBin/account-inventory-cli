@@ -3,14 +3,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { HistoryFilters } from "@/components/history/HistoryFilters";
 import { HistoryTable } from "@/components/history/HistoryTable";
-import { fetchUnifiedHistory } from "@/lib/api";
+import { commitReInboundFromHistory, fetchInventory, fetchUnifiedHistory } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
-import type { DateRangeFilter, HistoryRecord } from "@/types/account";
+import type { DateRangeFilter, HistoryRecord, OutboundRecord } from "@/types/account";
 
 export default function HistoryPage() {
   const [query, setQuery] = useState("");
   const [ranges, setRanges] = useState<DateRangeFilter[]>([]);
   const [records, setRecords] = useState<HistoryRecord[]>([]);
+  const [inventoryUsernames, setInventoryUsernames] = useState<Set<string>>(
+    new Set()
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
@@ -27,14 +30,20 @@ export default function HistoryPage() {
 
   useEffect(() => {
     let active = true;
-    fetchUnifiedHistory({
-      type: "all",
-      q: query,
-      ranges: rangeValues,
-    })
-      .then((payload) => {
+    Promise.all([
+      fetchUnifiedHistory({
+        type: "all",
+        q: query,
+        ranges: rangeValues,
+      }),
+      fetchInventory(),
+    ])
+      .then(([historyPayload, inventoryPayload]) => {
         if (!active) return;
-        setRecords(payload);
+        setRecords(historyPayload);
+        setInventoryUsernames(
+          new Set(inventoryPayload.map((item) => item.username))
+        );
         setError("");
       })
       .catch((requestError) => {
@@ -43,6 +52,7 @@ export default function HistoryPage() {
           requestError instanceof Error ? requestError.message : "历史流水读取失败"
         );
         setRecords([]);
+        setInventoryUsernames(new Set());
       })
       .finally(() => {
         if (!active) return;
@@ -55,6 +65,14 @@ export default function HistoryPage() {
 
   useEffect(
     () => subscribeDatabaseChanged(() => setReloadToken((value) => value + 1)),
+    []
+  );
+
+  const handleReInbound = useCallback(
+    async (record: OutboundRecord | HistoryRecord) => {
+      await commitReInboundFromHistory(record);
+      setReloadToken((value) => value + 1);
+    },
     []
   );
 
@@ -77,6 +95,8 @@ export default function HistoryPage() {
         error={error}
         emptyMessage="暂无历史流水记录"
         onRetry={retry}
+        inventoryUsernames={inventoryUsernames}
+        onReInbound={handleReInbound}
       />
     </div>
   );

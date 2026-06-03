@@ -924,33 +924,6 @@ export default function DashboardPage() {
                 I 聚焦输入 · ↑↓ 移动待确认 · Space/Enter 切换 · Y 批准 · N 取消 · Esc 取消未批准
               </p>
             </div>
-            <div className="flex flex-wrap gap-2 sm:justify-end">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() =>
-                  setApprovedPendingIds(
-                    new Set(
-                      displayedRows
-                        .filter((row) => displayCategory(row) === "pending")
-                        .map((row) => row.clientId)
-                    )
-                  )
-                }
-                disabled={counts.pending === 0}
-              >
-                批准全部待确认
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => handleTextChange("")}
-                disabled={!text}
-              >
-                <Trash2 className="h-4 w-4" />
-                清空
-              </Button>
-            </div>
           </CardHeader>
           <CardContent className="space-y-4 p-4 pt-0 sm:p-6 sm:pt-0">
             <Textarea
@@ -996,6 +969,33 @@ export default function DashboardPage() {
               >
                 <Check className="h-4 w-4" />
                 确认入库 ({approvedReadyCount})
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full sm:w-auto"
+                onClick={() =>
+                  setApprovedPendingIds(
+                    new Set(
+                      displayedRows
+                        .filter((row) => displayCategory(row) === "pending")
+                        .map((row) => row.clientId)
+                    )
+                  )
+                }
+                disabled={counts.pending === 0}
+              >
+                批准全部待确认
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full sm:w-auto"
+                onClick={() => handleTextChange("")}
+                disabled={!text}
+              >
+                <Trash2 className="h-4 w-4" />
+                清空
               </Button>
               <span className="text-xs text-muted-foreground">
                 未批准的曾出库条目会在提交后标记为取消

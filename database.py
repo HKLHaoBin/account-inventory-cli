@@ -964,6 +964,29 @@ def list_inbound_history(
     return [_row_to_inbound_dict(row) for row in rows]
 
 
+def get_outbound_record(record_id: int) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT ob.id, ob.username, ob.password, ob.email, ob.email_password, ob.url,
+                   ob.inbound_at, ob.outbound_at, ob.inbound_record_id,
+                   COALESCE(an.note, '') AS note
+            FROM outbound_records AS ob
+            LEFT JOIN account_notes AS an ON an.username = ob.username
+            WHERE ob.id = ?
+            """,
+            (record_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        **_row_to_account_dict(row),
+        "inbound_at": row["inbound_at"],
+        "outbound_at": row["outbound_at"],
+        "inbound_record_id": row["inbound_record_id"],
+    }
+
+
 def list_outbound_history(
     *,
     query: str = "",

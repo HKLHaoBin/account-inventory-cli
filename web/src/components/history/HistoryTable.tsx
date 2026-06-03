@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Copy, Download } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,8 @@ interface HistoryTableProps {
   error?: string;
   emptyMessage?: string;
   onRetry?: () => void;
+  inventoryUsernames?: Set<string>;
+  onReInbound?: (record: OutboundRecord | HistoryRecord) => Promise<void>;
 }
 
 type HistoryCopyRecord = Parameters<typeof formatHistoryRecordLine>[0];
@@ -52,6 +55,71 @@ function isOutboundRecord(
   return "outboundAt" in record;
 }
 
+function canReInbound(
+  record: HistoryRecord | InboundRecord | OutboundRecord,
+  mode: HistoryTableMode,
+  onReInbound?: HistoryTableProps["onReInbound"]
+): record is OutboundRecord | HistoryRecord {
+  if (!onReInbound || mode === "inbound") return false;
+  if (mode === "outbound") return true;
+  return isHistoryRecord(record) && record.type === "outbound";
+}
+
+function RowActions({
+  record,
+  mode,
+  inventoryUsernames,
+  onReInbound,
+  busyId,
+  rowErrors,
+  onReInboundClick,
+}: {
+  record: HistoryRecord | InboundRecord | OutboundRecord;
+  mode: HistoryTableMode;
+  inventoryUsernames?: Set<string>;
+  onReInbound?: HistoryTableProps["onReInbound"];
+  busyId: string | null;
+  rowErrors: Record<string, string>;
+  onReInboundClick: (record: OutboundRecord | HistoryRecord) => void;
+}) {
+  const showReInbound = canReInbound(record, mode, onReInbound);
+  const inInventory = inventoryUsernames?.has(record.username) ?? false;
+  const isBusy = busyId === record.id;
+  const rowError = rowErrors[record.id];
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1 whitespace-nowrap">
+        {showReInbound && (
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 px-2 text-xs"
+            disabled={inInventory || isBusy || Boolean(busyId)}
+            title={inInventory ? "已在库存" : undefined}
+            onClick={() => onReInboundClick(record)}
+          >
+            {isBusy ? "入库中…" : "重新入库"}
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0"
+          title="复制"
+          disabled={Boolean(busyId) && busyId !== record.id}
+          onClick={() => void copyLine(record)}
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      {rowError && (
+        <p className="max-w-[140px] text-xs text-red-600">{rowError}</p>
+      )}
+    </div>
+  );
+}
+
 export function HistoryTable({
   mode,
   exportMode,
@@ -60,9 +128,35 @@ export function HistoryTable({
   error = "",
   emptyMessage = "暂无历史记录",
   onRetry,
+  inventoryUsernames,
+  onReInbound,
 }: HistoryTableProps) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+
   const filenameMode = exportMode ?? mode;
   const bulkDisabled = loading || records.length === 0;
+
+  async function handleReInboundClick(record: OutboundRecord | HistoryRecord) {
+    if (!onReInbound || busyId) return;
+    setBusyId(record.id);
+    setRowErrors((current) => {
+      const next = { ...current };
+      delete next[record.id];
+      return next;
+    });
+    try {
+      await onReInbound(record);
+    } catch (err) {
+      setRowErrors((current) => ({
+        ...current,
+        [record.id]:
+          err instanceof Error ? err.message : "重新入库失败",
+      }));
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function copyAll() {
     try {
@@ -154,6 +248,9 @@ export function HistoryTable({
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border bg-muted/40">
+                      <th className="px-2 py-3 text-left font-medium whitespace-nowrap">
+                        操作
+                      </th>
                       {mode === "all" && (
                         <th className="px-4 py-3 text-left font-medium">类型</th>
                       )}
@@ -166,7 +263,6 @@ export function HistoryTable({
                         <th className="px-4 py-3 text-left font-medium">出库时间</th>
                       )}
                       <th className="px-4 py-3 text-left font-medium">备注</th>
-                      <th className="px-4 py-3 text-left font-medium">操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -178,6 +274,17 @@ export function HistoryTable({
                           key={record.id}
                           className="border-b border-border last:border-0 hover:bg-muted/30"
                         >
+                          <td className="px-2 py-3">
+                            <RowActions
+                              record={record}
+                              mode={mode}
+                              inventoryUsernames={inventoryUsernames}
+                              onReInbound={onReInbound}
+                              busyId={busyId}
+                              rowErrors={rowErrors}
+                              onReInboundClick={handleReInboundClick}
+                            />
+                          </td>
                           {mode === "all" && history && (
                             <td className="px-4 py-3">
                               <Badge
@@ -228,16 +335,6 @@ export function HistoryTable({
                           <td className="break-words whitespace-pre-wrap px-4 py-3 text-xs text-muted-foreground">
                             {record.note?.trim() ? record.note : "—"}
                           </td>
-                          <td className="px-4 py-3">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              title="复制"
-                              onClick={() => void copyLine(record)}
-                            >
-                              <Copy className="h-3.5 w-3.5" />
-                            </Button>
-                          </td>
                         </tr>
                       );
                     })}
@@ -254,7 +351,16 @@ export function HistoryTable({
                       key={`${record.id}-mobile`}
                       className="rounded-xl border border-border p-3"
                     >
-                      <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2">
+                        <RowActions
+                          record={record}
+                          mode={mode}
+                          inventoryUsernames={inventoryUsernames}
+                          onReInbound={onReInbound}
+                          busyId={busyId}
+                          rowErrors={rowErrors}
+                          onReInboundClick={handleReInboundClick}
+                        />
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex flex-wrap items-center gap-2">
                             {mode === "all" && history && (
@@ -297,15 +403,6 @@ export function HistoryTable({
                             </p>
                           )}
                         </div>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="shrink-0"
-                          title="复制"
-                          onClick={() => void copyLine(record)}
-                        >
-                          <Copy className="h-4 w-4" />
-                        </Button>
                       </div>
                     </div>
                   );

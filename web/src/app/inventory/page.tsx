@@ -7,6 +7,7 @@ import {
   CheckSquare,
   Square,
   PackageOpen,
+  Upload,
 } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -14,7 +15,13 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
-import { fetchInventory, writeAppClipboardText } from "@/lib/api";
+import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
+import {
+  fetchInventory,
+  outboundByUsername,
+  writeAppClipboardText,
+} from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import {
   cn,
@@ -37,6 +44,19 @@ export default function InventoryPage() {
   const [records, setRecords] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [outboundUsername, setOutboundUsername] = useState<string | null>(null);
+  const [outboundRowErrors, setOutboundRowErrors] = useState<
+    Record<string, string>
+  >({});
+  const [lastOutboundCopyFailed, setLastOutboundCopyFailed] = useState(false);
+  const {
+    clipboardText,
+    remember,
+    clear,
+    copy,
+    copying,
+    copied,
+  } = useLastOutboundClipboard();
 
   const loadInventory = useCallback(async () => {
     setLoading(true);
@@ -80,8 +100,16 @@ export default function InventoryPage() {
   }, []);
 
   useEffect(
-    () => subscribeDatabaseChanged(() => void loadInventory()),
-    [loadInventory]
+    () =>
+      subscribeDatabaseChanged(() => {
+        clear();
+        setLastOutboundCopyFailed(false);
+        setOutboundRowErrors({});
+        setOutboundUsername(null);
+        setSelected(new Set());
+        void loadInventory();
+      }),
+    [loadInventory, clear]
   );
 
   const sorted = useMemo(() => {
@@ -153,6 +181,41 @@ export default function InventoryPage() {
       )
     );
   };
+
+  const outboundAccount = async (account: Account) => {
+    if (outboundUsername) return;
+    setOutboundUsername(account.username);
+    setOutboundRowErrors((current) => {
+      const next = { ...current };
+      delete next[account.id];
+      return next;
+    });
+    setLastOutboundCopyFailed(false);
+    try {
+      const payload = await outboundByUsername(account.username);
+      const text = payload.clipboardText ?? "";
+      remember(text);
+      const copiedOk = text ? await copy(text) : true;
+      setLastOutboundCopyFailed(!copiedOk);
+      await loadInventory();
+    } catch (requestError) {
+      setOutboundRowErrors((current) => ({
+        ...current,
+        [account.id]:
+          requestError instanceof Error ? requestError.message : "出库失败",
+      }));
+    } finally {
+      setOutboundUsername(null);
+    }
+  };
+
+  async function handleCopyOutbound() {
+    setLastOutboundCopyFailed(false);
+    const ok = await copy();
+    if (!ok && clipboardText) {
+      setLastOutboundCopyFailed(true);
+    }
+  }
 
   const rowPadding = density === "compact" ? "py-2" : "py-3.5";
 
@@ -278,6 +341,25 @@ export default function InventoryPage() {
         </Button>
       </div>
 
+      {clipboardText && (
+        <Card className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
+            <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
+              {lastOutboundCopyFailed
+                ? "已出库，复制失败可点重新复制"
+                : "账号已出库，可重新复制"}
+            </p>
+            <OutboundCopyButton
+              size="sm"
+              clipboardText={clipboardText}
+              copying={copying}
+              copied={copied}
+              onCopy={handleCopyOutbound}
+            />
+          </CardContent>
+        </Card>
+      )}
+
       {sorted.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-sm text-muted-foreground">
@@ -291,6 +373,9 @@ export default function InventoryPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-muted/40">
+                    <th className="px-2 py-3 text-left font-medium whitespace-nowrap">
+                      操作
+                    </th>
                     <th className="w-10 px-4 py-3">
                       <button type="button" onClick={toggleAll}>
                         {visibleSelectedCount === sorted.length &&
@@ -308,7 +393,6 @@ export default function InventoryPage() {
                     <th className="px-4 py-3 text-left font-medium">网址</th>
                     <th className="px-4 py-3 text-left font-medium">备注</th>
                     <th className="px-4 py-3 text-left font-medium">入库时间</th>
-                    <th className="px-4 py-3 text-left font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -318,6 +402,7 @@ export default function InventoryPage() {
                       sortDir === "asc" &&
                       index === 0 &&
                       !filter;
+                    const rowError = outboundRowErrors[account.id];
                     return (
                       <tr
                         key={account.id}
@@ -327,6 +412,38 @@ export default function InventoryPage() {
                           isFirst && "bg-primary/[0.03]"
                         )}
                       >
+                        <td className={cn("px-2", rowPadding)}>
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-1 whitespace-nowrap">
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                disabled={Boolean(outboundUsername)}
+                                onClick={() => void outboundAccount(account)}
+                              >
+                                <Upload className="h-3.5 w-3.5" />
+                                {outboundUsername === account.username
+                                  ? "出库中…"
+                                  : "出库"}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 shrink-0"
+                                onClick={() => copyAccount(account)}
+                                aria-label="复制"
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                            {rowError && (
+                              <p className="max-w-[140px] text-xs text-red-600">
+                                {rowError}
+                              </p>
+                            )}
+                          </div>
+                        </td>
                         <td className={cn("px-4", rowPadding)}>
                           <button
                             type="button"
@@ -402,18 +519,6 @@ export default function InventoryPage() {
                         >
                           {formatDateTime(account.inboundAt)}
                         </td>
-                        <td className={cn("px-4", rowPadding)}>
-                          <div className="flex gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => copyAccount(account)}
-                              aria-label="复制"
-                            >
-                              <Copy className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </td>
                       </tr>
                     );
                   })}
@@ -440,6 +545,7 @@ export default function InventoryPage() {
                   sortDir === "asc" &&
                   index === 0 &&
                   !filter;
+                const rowError = outboundRowErrors[account.id];
                 return (
                   <div
                     key={`${account.id}-mobile`}
@@ -449,7 +555,37 @@ export default function InventoryPage() {
                       isFirst && "bg-primary/[0.03]"
                     )}
                   >
-                    <div className="flex items-start gap-3">
+                    <div className="flex items-start gap-2">
+                      <div className="flex shrink-0 flex-col gap-1">
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="h-8 px-2 text-xs"
+                            disabled={Boolean(outboundUsername)}
+                            onClick={() => void outboundAccount(account)}
+                          >
+                            <Upload className="h-3.5 w-3.5" />
+                            {outboundUsername === account.username
+                              ? "出库中…"
+                              : "出库"}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 shrink-0"
+                            onClick={() => copyAccount(account)}
+                            aria-label="复制"
+                          >
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                        </div>
+                        {rowError && (
+                          <p className="max-w-[140px] text-xs text-red-600">
+                            {rowError}
+                          </p>
+                        )}
+                      </div>
                       <button
                         type="button"
                         className="pt-0.5"
@@ -493,15 +629,6 @@ export default function InventoryPage() {
                           入库 {formatDateTime(account.inboundAt)}
                         </p>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="shrink-0"
-                        onClick={() => copyAccount(account)}
-                        aria-label="复制"
-                      >
-                        <Copy className="h-4 w-4" />
-                      </Button>
                     </div>
                   </div>
                 );

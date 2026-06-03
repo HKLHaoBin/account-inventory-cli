@@ -108,6 +108,10 @@ class OutboundHistoryPayload(BaseModel):
     records: list[OutboundRecordPayload]
 
 
+class ReinboundFromHistoryPayload(BaseModel):
+    account: AccountPayload
+
+
 class InventoryPayload(BaseModel):
     records: list[AccountPayload]
 
@@ -696,6 +700,49 @@ def get_outbound_history(
             _outbound_record_payload(row)
             for row in db.list_outbound_history(query=q.strip(), range_tokens=ranges)
         ]
+    )
+
+
+@app.post(
+    "/api/outbound/history/{record_id}/reinbound",
+    response_model=ReinboundFromHistoryPayload,
+)
+def reinbound_from_outbound_history(record_id: int) -> ReinboundFromHistoryPayload:
+    row = db.get_outbound_record(record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="出库记录不存在")
+
+    username = row["username"]
+    if db.exists_in_inventory(username):
+        raise HTTPException(status_code=400, detail=f"账号 {username} 已在库存中")
+
+    try:
+        db.insert_account(
+            username,
+            row["password"],
+            row["email"],
+            row["email_password"],
+            row["url"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    note = str(row.get("note") or "").strip()
+    if note:
+        db.set_account_note(username, note, overwrite=False)
+
+    inventory_rows = db.search_inventory(username)
+    account_row = next(
+        (item for item in inventory_rows if item["username"] == username),
+        None,
+    )
+    if account_row is None:
+        raise HTTPException(status_code=500, detail="入库后未找到库存记录")
+
+    return ReinboundFromHistoryPayload(
+        account=_account_payload(
+            {**account_row, "created_at": account_row["created_at"]}
+        )
     )
 
 

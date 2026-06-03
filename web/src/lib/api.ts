@@ -170,6 +170,27 @@ export function commitInbound(
   });
 }
 
+function resolveOutboundHistoryRecordId(
+  record: OutboundRecord | HistoryRecord
+): string {
+  if ("type" in record && record.type === "outbound") {
+    const prefix = "outbound-";
+    if (record.id.startsWith(prefix)) {
+      return record.id.slice(prefix.length);
+    }
+  }
+  return record.id;
+}
+
+export async function commitReInboundFromHistory(
+  record: OutboundRecord | HistoryRecord
+): Promise<void> {
+  const recordId = resolveOutboundHistoryRecordId(record);
+  await requestJson(`/api/outbound/history/${encodeURIComponent(recordId)}/reinbound`, {
+    method: "POST",
+  });
+}
+
 export function previewFifo(quantity: number): Promise<FifoPreviewPayload> {
   return requestJson<FifoPreviewPayload>("/api/outbound/fifo/preview", {
     method: "POST",
