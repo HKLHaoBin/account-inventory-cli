@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Minus, Plus, Copy, Check, Package, Download } from "lucide-react";
+import { Minus, Plus, Package, Download, Upload } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,11 +10,9 @@ import { Modal } from "@/components/ui/modal";
 import { PasswordField } from "@/components/ui/password-field";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
-import {
-  commitFifo,
-  previewFifo,
-  writeOutboundClipboardText,
-} from "@/lib/api";
+import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
+import { commitFifo, previewFifo } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
 import { formatDateTime } from "@/lib/utils";
@@ -29,8 +27,15 @@ export default function OutboundPage() {
   });
   const [fifoNotes, setFifoNotes] = useState<FifoNoteEntry[]>([]);
   const [fifoBusy, setFifoBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [resultMessage, setResultMessage] = useState("");
+  const {
+    clipboardText,
+    remember,
+    clear: clearClipboard,
+    copy,
+    copying,
+    copied,
+  } = useLastOutboundClipboard();
   const [resultOpen, setResultOpen] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
@@ -94,6 +99,10 @@ export default function OutboundPage() {
     []
   );
 
+  useEffect(() => {
+    clearClipboard();
+  }, [quantity, clearClipboard]);
+
   function updateFifoNote(
     username: string,
     patch: Partial<{ note: string; overwriteNote: boolean }>
@@ -115,25 +124,19 @@ export default function OutboundPage() {
     );
   }
 
-  const handleOutbound = async (mode: "clipboard" | "txt") => {
+  async function handleCommit() {
     if (clamped === 0 || fifoBusy) return;
     setFifoBusy(true);
+    setLoadError("");
     try {
       const payload = await commitFifo(quantity, fifoNotes);
-      if (payload.clipboardText) {
-        if (mode === "clipboard") {
-          await writeOutboundClipboardText(payload.clipboardText);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
-        } else {
-          downloadTextFile(payload.clipboardText);
-          setCopied(false);
-        }
-      }
+      const text = payload.clipboardText ?? "";
+      remember(text);
+      const copiedOk = text ? await copy(text) : true;
       setResultMessage(
-        mode === "clipboard"
+        copiedOk
           ? `已出库 ${payload.quantity} 条并复制到剪贴板`
-          : `已出库 ${payload.quantity} 条并下载 TXT`
+          : `已出库 ${payload.quantity} 条，复制失败请点重新复制`
       );
       setResultOpen(true);
       setQuantity(1);
@@ -143,7 +146,36 @@ export default function OutboundPage() {
     } finally {
       setFifoBusy(false);
     }
-  };
+  }
+
+  async function handleDownload() {
+    if (clamped === 0 || fifoBusy) return;
+    setFifoBusy(true);
+    setLoadError("");
+    try {
+      const payload = await commitFifo(quantity, fifoNotes);
+      remember(payload.clipboardText ?? "");
+      if (payload.clipboardText) {
+        downloadTextFile(payload.clipboardText);
+      }
+      setResultMessage(`已出库 ${payload.quantity} 条并下载 TXT`);
+      setResultOpen(true);
+      setQuantity(1);
+      setReloadToken((token) => token + 1);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "FIFO 出库失败");
+    } finally {
+      setFifoBusy(false);
+    }
+  }
+
+  async function handleCopy() {
+    setLoadError("");
+    const ok = await copy();
+    if (!ok && clipboardText) {
+      setLoadError("复制到剪贴板失败，请重试");
+    }
+  }
 
   if (max === 0 && !loadError) {
     return (
@@ -162,7 +194,7 @@ export default function OutboundPage() {
       <div className="text-center">
         <h1 className="text-2xl font-bold tracking-tight">FIFO 出库</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          按入库时间先进先出，自动复制到剪贴板
+          按入库时间先进先出，出库并复制到剪贴板，失败可重新复制
         </p>
         <Badge variant="default" className="mt-3">
           当前库存 {max} 条
@@ -247,21 +279,30 @@ export default function OutboundPage() {
             disabled={fifoBusy}
           />
 
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-2 sm:grid-cols-3">
             <Button
               className="w-full"
               size="lg"
-              onClick={() => handleOutbound("clipboard")}
+              onClick={() => void handleCommit()}
               disabled={clamped === 0 || fifoBusy}
             >
-              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              <Upload className="h-4 w-4" />
               出库并复制
             </Button>
+            <OutboundCopyButton
+              className="w-full"
+              size="lg"
+              clipboardText={clipboardText}
+              copying={copying}
+              copied={copied}
+              onCopy={handleCopy}
+              disabled={fifoBusy}
+            />
             <Button
               className="w-full"
               variant="secondary"
               size="lg"
-              onClick={() => handleOutbound("txt")}
+              onClick={() => void handleDownload()}
               disabled={clamped === 0 || fifoBusy}
             >
               <Download className="h-4 w-4" />
@@ -401,6 +442,12 @@ export default function OutboundPage() {
         description={resultMessage}
         footer={
           <>
+            <OutboundCopyButton
+              clipboardText={clipboardText}
+              copying={copying}
+              copied={copied}
+              onCopy={handleCopy}
+            />
             <Button
               variant="secondary"
               onClick={() => {

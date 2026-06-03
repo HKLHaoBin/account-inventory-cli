@@ -13,11 +13,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/input";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
-import {
-  commitOutboundPaste,
-  writeAppClipboardText,
-  writeOutboundClipboardText,
-} from "@/lib/api";
+import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
+import { commitOutboundPaste, writeAppClipboardText } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { useSeparatorRules } from "@/lib/use-separator-rules";
@@ -104,6 +102,14 @@ export default function OutboundPastePage() {
   const [clipboardState, setClipboardState] = useState("连接剪贴板检测中");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const {
+    clipboardText,
+    remember,
+    clear: clearClipboard,
+    copy,
+    copying,
+    copied,
+  } = useLastOutboundClipboard();
 
   const resetForText = useCallback((value: string) => {
     textRef.current = value;
@@ -113,7 +119,8 @@ export default function OutboundPastePage() {
     setDeletedIds(new Set());
     setResultRows(new Map());
     setMessage("");
-  }, [enabledSeparators, rulesReady]);
+    clearClipboard();
+  }, [clearClipboard, enabledSeparators, rulesReady]);
 
   const appendText = useCallback((value: string) => {
     const nextValue = value.trim();
@@ -224,16 +231,27 @@ export default function OutboundPastePage() {
       const nextRows = new Map(payload.rows.map((row) => [row.clientId, row]));
       resultRowsRef.current = nextRows;
       setResultRows(nextRows);
-      if (payload.clipboardText) {
-        await writeOutboundClipboardText(payload.clipboardText);
-      }
+      const text = payload.clipboardText ?? "";
+      remember(text);
+      const copiedOk = text ? await copy(text) : true;
+      const summary = `出库完成：成功 ${payload.successCount} 条，失败 ${payload.errorCount} 条`;
       setMessage(
-        `出库完成：成功 ${payload.successCount} 条，失败 ${payload.errorCount} 条`
+        copiedOk
+          ? `${summary}，已复制到剪贴板`
+          : `${summary}，复制失败请点重新复制`
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "出库提交失败");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleCopyOutbound() {
+    setMessage("");
+    const ok = await copy();
+    if (!ok && clipboardText) {
+      setMessage("复制到剪贴板失败，请重试");
     }
   }
 
@@ -471,8 +489,16 @@ export default function OutboundPastePage() {
           disabled={busy || commitRows.length === 0 || rulesLoading || !!rulesError}
         >
           <Check className="h-4 w-4" />
-          确认出库 ({commitRows.length})
+          确认出库并复制 ({commitRows.length})
         </Button>
+        <OutboundCopyButton
+          variant="outline"
+          clipboardText={clipboardText}
+          copying={copying}
+          copied={copied}
+          onCopy={handleCopyOutbound}
+          disabled={busy}
+        />
         <Button variant="outline" onClick={copyFailures} disabled={displayedRows.length === 0}>
           <Copy className="h-4 w-4" />
           复制失败行

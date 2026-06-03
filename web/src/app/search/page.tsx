@@ -7,15 +7,16 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
+import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
   outboundByUsername,
   searchAccounts,
   writeAppClipboardText,
-  writeOutboundClipboardText,
 } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
-import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import type { SearchResult } from "@/types/account";
 
 function highlight(text: string, query: string) {
@@ -43,6 +44,14 @@ function SearchContent() {
   const [outboundNotes, setOutboundNotes] = useState<
     Record<string, { note: string; overwriteNote: boolean }>
   >({});
+  const {
+    clipboardText,
+    remember,
+    copy,
+    copying,
+    copied,
+  } = useLastOutboundClipboard();
+  const [copyError, setCopyError] = useState("");
 
   const inventoryResults = results.filter((r) => r.source === "inventory");
   const historyResults = results.filter((r) => r.source === "history");
@@ -120,13 +129,17 @@ function SearchContent() {
     const draft = outboundNotes[username] ?? { note: "", overwriteNote: false };
     setOutboundUsername(username);
     setError("");
+    setCopyError("");
     try {
       const payload = await outboundByUsername(username, {
         note: draft.note.trim() || undefined,
         overwriteNote: draft.overwriteNote,
       });
-      if (payload.clipboardText) {
-        await writeOutboundClipboardText(payload.clipboardText);
+      const text = payload.clipboardText ?? "";
+      remember(text);
+      const copiedOk = text ? await copy(text) : true;
+      if (!copiedOk) {
+        setCopyError("已出库，复制失败请点重新复制");
       }
       setOutboundNotes((current) => {
         const next = { ...current };
@@ -142,6 +155,14 @@ function SearchContent() {
       setOutboundUsername("");
     }
   };
+
+  async function handleCopyOutbound() {
+    setCopyError("");
+    const ok = await copy();
+    if (!ok && clipboardText) {
+      setCopyError("复制到剪贴板失败，请重试");
+    }
+  }
 
   function updateOutboundNote(
     username: string,
@@ -200,6 +221,28 @@ function SearchContent() {
             <Card className="border-red-200 bg-red-50">
               <CardContent className="py-3 text-sm text-red-700">
                 {error}
+              </CardContent>
+            </Card>
+          )}
+
+          {clipboardText && (
+            <Card className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30">
+              <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                  账号已出库，复制失败可点重新复制
+                </p>
+                <div className="flex items-center gap-2">
+                  {copyError && (
+                    <span className="text-sm text-red-600">{copyError}</span>
+                  )}
+                  <OutboundCopyButton
+                    size="sm"
+                    clipboardText={clipboardText}
+                    copying={copying}
+                    copied={copied}
+                    onCopy={handleCopyOutbound}
+                  />
+                </div>
               </CardContent>
             </Card>
           )}
@@ -293,7 +336,7 @@ function SearchContent() {
                             <Upload className="h-4 w-4" />
                             {outboundUsername === r.account.username
                               ? "出库中…"
-                              : "出库"}
+                              : "出库并复制"}
                           </Button>
                         )}
                       </div>
@@ -308,7 +351,7 @@ function SearchContent() {
                     <div>
                       <p className="font-medium">唯一库存命中</p>
                       <p className="text-sm text-muted-foreground">
-                        可直接出库此账号（非 FIFO）
+                        可直接出库此账号并复制（非 FIFO）
                       </p>
                     </div>
                     <div className="flex flex-col items-end gap-2">
@@ -338,7 +381,7 @@ function SearchContent() {
                         disabled={Boolean(outboundUsername)}
                       >
                         <Upload className="h-4 w-4" />
-                        {outboundUsername ? "出库中…" : "出库此账号"}
+                        {outboundUsername ? "出库中…" : "出库此账号并复制"}
                       </Button>
                     </div>
                   </CardContent>

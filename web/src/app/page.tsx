@@ -6,7 +6,6 @@ import {
   ArrowUpFromLine,
   Check,
   Clipboard,
-  Copy,
   Download,
   Minus,
   Package,
@@ -21,12 +20,13 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/input";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
   commitFifo,
   commitInbound,
   fetchDashboard,
   previewFifo,
-  writeOutboundClipboardText,
 } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
@@ -386,6 +386,14 @@ export default function DashboardPage() {
   const [fifoBusy, setFifoBusy] = useState(false);
   const [fifoMessage, setFifoMessage] = useState("");
   const [fifoNotes, setFifoNotes] = useState<FifoNoteEntry[]>([]);
+  const {
+    clipboardText: fifoClipboardText,
+    remember: rememberFifoClipboard,
+    clear: clearFifoClipboard,
+    copy: copyFifoClipboard,
+    copying: fifoCopying,
+    copied: fifoCopied,
+  } = useLastOutboundClipboard();
 
   const replaceInboundText = useCallback((value: string) => {
     inboundTextRef.current = value;
@@ -561,6 +569,10 @@ export default function DashboardPage() {
     };
   }, [fifoQuantity, dashboard.stats.inventoryCount]);
 
+  useEffect(() => {
+    clearFifoClipboard();
+  }, [fifoQuantity, clearFifoClipboard]);
+
   const displayedRows = useMemo(() => {
     return previewRows
       .filter((row) => !deletedIds.has(row.clientId))
@@ -682,28 +694,52 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleFifoCommit(mode: "clipboard" | "txt") {
+  async function handleFifoCommit() {
     if (fifoPreview.quantity <= 0) return;
     setFifoBusy(true);
+    setFifoMessage("");
     try {
       const payload = await commitFifo(fifoQuantity, fifoNotes);
-      if (payload.clipboardText) {
-        if (mode === "clipboard") {
-          await writeOutboundClipboardText(payload.clipboardText);
-        } else {
-          downloadTextFile(payload.clipboardText);
-        }
-      }
+      const text = payload.clipboardText ?? "";
+      rememberFifoClipboard(text);
+      const copiedOk = text ? await copyFifoClipboard(text) : true;
       setFifoMessage(
-        mode === "clipboard"
+        copiedOk
           ? `已出库 ${payload.quantity} 条并复制到剪贴板`
-          : `已出库 ${payload.quantity} 条并下载 TXT`
+          : `已出库 ${payload.quantity} 条，复制失败请点重新复制`
       );
       await loadDashboard();
     } catch (error) {
       setFifoMessage(error instanceof Error ? error.message : "FIFO 出库失败");
     } finally {
       setFifoBusy(false);
+    }
+  }
+
+  async function handleFifoDownload() {
+    if (fifoPreview.quantity <= 0) return;
+    setFifoBusy(true);
+    setFifoMessage("");
+    try {
+      const payload = await commitFifo(fifoQuantity, fifoNotes);
+      rememberFifoClipboard(payload.clipboardText ?? "");
+      if (payload.clipboardText) {
+        downloadTextFile(payload.clipboardText);
+      }
+      setFifoMessage(`已出库 ${payload.quantity} 条并下载 TXT`);
+      await loadDashboard();
+    } catch (error) {
+      setFifoMessage(error instanceof Error ? error.message : "FIFO 出库失败");
+    } finally {
+      setFifoBusy(false);
+    }
+  }
+
+  async function handleFifoCopy() {
+    setFifoMessage("");
+    const ok = await copyFifoClipboard();
+    if (!ok && fifoClipboardText) {
+      setFifoMessage("复制到剪贴板失败，请重试");
     }
   }
 
@@ -1291,19 +1327,27 @@ export default function DashboardPage() {
               </p>
             )}
 
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-3">
               <Button
                 className="w-full"
-                onClick={() => handleFifoCommit("clipboard")}
+                onClick={() => void handleFifoCommit()}
                 disabled={fifoBusy || fifoPreview.quantity === 0}
               >
-                <Copy className="h-4 w-4" />
+                <Upload className="h-4 w-4" />
                 出库并复制 ({fifoPreview.quantity})
               </Button>
+              <OutboundCopyButton
+                className="w-full"
+                clipboardText={fifoClipboardText}
+                copying={fifoCopying}
+                copied={fifoCopied}
+                onCopy={handleFifoCopy}
+                disabled={fifoBusy}
+              />
               <Button
                 className="w-full"
                 variant="secondary"
-                onClick={() => handleFifoCommit("txt")}
+                onClick={() => void handleFifoDownload()}
                 disabled={fifoBusy || fifoPreview.quantity === 0}
               >
                 <Download className="h-4 w-4" />

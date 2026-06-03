@@ -16,9 +16,10 @@ import { Badge } from "@/components/ui/badge";
 import {
   outboundByUsername,
   searchAccounts,
-  writeOutboundClipboardText,
 } from "@/lib/api";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import { shouldResetTopbarNoteDraft } from "@/components/notes/note-overwrite-logic";
 import type { SearchResult } from "@/types/account";
 
@@ -52,6 +53,16 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
   const [outboundBusy, setOutboundBusy] = useState(false);
   const [outboundNote, setOutboundNote] = useState("");
   const [outboundOverwriteNote, setOutboundOverwriteNote] = useState(false);
+  const [outboundSuccess, setOutboundSuccess] = useState(false);
+  const [outboundCopyError, setOutboundCopyError] = useState("");
+  const {
+    clipboardText,
+    remember,
+    clear: clearClipboard,
+    copy,
+    copying,
+    copied,
+  } = useLastOutboundClipboard();
 
   useEffect(() => {
     const q = query.trim();
@@ -99,6 +110,9 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
         setLoading(false);
         setSearchError("");
         clearOutboundNoteDraft();
+        clearClipboard();
+        setOutboundSuccess(false);
+        setOutboundCopyError("");
         setOpen(false);
         inputRef.current?.blur();
       }
@@ -133,20 +147,33 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     topbarDraftKeyRef.current = next;
   }, [query, uniqueHitUsername]);
 
+  function finishOutboundFlow() {
+    setQuery("");
+    setResults([]);
+    setLoading(false);
+    setSearchError("");
+    clearOutboundNoteDraft();
+    clearClipboard();
+    setOutboundSuccess(false);
+    setOutboundCopyError("");
+    setOpen(false);
+  }
+
   const handleUniqueOutbound = async () => {
     const hit = inventoryResults[0];
     if (!hit || outboundBusy) return;
 
     setOutboundBusy(true);
     setSearchError("");
+    setOutboundCopyError("");
     try {
       const payload = await outboundByUsername(hit.account.username, {
         note: outboundNote.trim() || undefined,
         overwriteNote: outboundOverwriteNote,
       });
-      if (payload.clipboardText) {
-        await writeOutboundClipboardText(payload.clipboardText);
-      }
+      const text = payload.clipboardText ?? "";
+      remember(text);
+      const copiedOk = text ? await copy(text) : true;
       const q = query.trim();
       if (q) {
         const updated = await searchAccounts(q);
@@ -155,8 +182,10 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
         setResults([]);
       }
       clearOutboundNoteDraft();
-      setQuery("");
-      setOpen(false);
+      setOutboundSuccess(true);
+      if (!copiedOk) {
+        setOutboundCopyError("已出库，复制失败请点重新复制");
+      }
     } catch (error) {
       setSearchError(
         error instanceof Error ? error.message : "出库失败"
@@ -165,6 +194,14 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
       setOutboundBusy(false);
     }
   };
+
+  async function handleCopyOutbound() {
+    setOutboundCopyError("");
+    const ok = await copy();
+    if (!ok && clipboardText) {
+      setOutboundCopyError("复制到剪贴板失败，请重试");
+    }
+  }
 
   return (
     <header className="flex h-16 shrink-0 items-center gap-4 border-b border-border bg-card/80 px-6 backdrop-blur-sm">
@@ -186,6 +223,9 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
               setLoading(false);
               setSearchError("");
               clearOutboundNoteDraft();
+              clearClipboard();
+              setOutboundSuccess(false);
+              setOutboundCopyError("");
             } else {
               setResults([]);
               setLoading(true);
@@ -206,6 +246,9 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
               setLoading(false);
               setSearchError("");
               clearOutboundNoteDraft();
+              clearClipboard();
+              setOutboundSuccess(false);
+              setOutboundCopyError("");
               setOpen(false);
             }}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
@@ -294,7 +337,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                     ))}
                   </div>
                 )}
-                {uniqueInventoryHit && (
+                {uniqueInventoryHit && !outboundSuccess && (
                   <div className="mt-2 space-y-2 border-t border-border p-2">
                     <OutboundNoteField
                       existingNote={inventoryResults[0].account.note}
@@ -312,6 +355,35 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                     >
                       {outboundBusy ? "出库中…" : "出库此账号并复制"}
                     </Button>
+                  </div>
+                )}
+                {outboundSuccess && (
+                  <div className="mt-2 space-y-2 border-t border-border bg-emerald-50 p-2 dark:bg-emerald-950/30">
+                    <p className="text-center text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                      已出库
+                    </p>
+                    {outboundCopyError && (
+                      <p className="text-center text-sm text-red-600">
+                        {outboundCopyError}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <OutboundCopyButton
+                        className="flex-1"
+                        size="sm"
+                        clipboardText={clipboardText}
+                        copying={copying}
+                        copied={copied}
+                        onCopy={handleCopyOutbound}
+                      />
+                      <Button
+                        className="flex-1"
+                        size="sm"
+                        onClick={finishOutboundFlow}
+                      >
+                        完成
+                      </Button>
+                    </div>
                   </div>
                 )}
                 <button

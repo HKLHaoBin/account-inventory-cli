@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Minus, Plus, Copy, Check, Download } from "lucide-react";
+import { Minus, Plus, Download, Upload } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
-import { commitFifo, previewFifo, writeOutboundClipboardText } from "@/lib/api";
+import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
+import { commitFifo, previewFifo } from "@/lib/api";
 import { downloadTextFile } from "@/lib/download";
 import type { Account, FifoNoteEntry } from "@/types/account";
 
@@ -23,7 +25,6 @@ export function QuickOutboundModal({
   onNavigate,
 }: QuickOutboundModalProps) {
   const [quantity, setQuantity] = useState(1);
-  const [copied, setCopied] = useState(false);
   const [success, setSuccess] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
   const [max, setMax] = useState(0);
@@ -32,6 +33,14 @@ export function QuickOutboundModal({
   const [message, setMessage] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
   const [busy, setBusy] = useState(false);
+  const {
+    clipboardText,
+    remember,
+    clear: clearClipboard,
+    copy,
+    copying,
+    copied,
+  } = useLastOutboundClipboard();
 
   const clamped = Math.min(Math.max(quantity, 0), max);
 
@@ -83,6 +92,11 @@ export function QuickOutboundModal({
     };
   }, [open, quantity, reloadToken]);
 
+  useEffect(() => {
+    if (!open) return;
+    clearClipboard();
+  }, [open, quantity, clearClipboard]);
+
   function updateFifoNote(
     username: string,
     patch: Partial<{ note: string; overwriteNote: boolean }>
@@ -104,40 +118,64 @@ export function QuickOutboundModal({
     );
   }
 
-  const handleOutbound = async (mode: "clipboard" | "txt") => {
+  async function handleCommit() {
     if (clamped === 0 || busy) return;
     setBusy(true);
+    setMessage("");
     try {
       const payload = await commitFifo(quantity, fifoNotes);
-      if (payload.clipboardText) {
-        if (mode === "clipboard") {
-          await writeOutboundClipboardText(payload.clipboardText);
-        } else {
-          downloadTextFile(payload.clipboardText);
-        }
-      }
+      const text = payload.clipboardText ?? "";
+      remember(text);
+      const copiedOk = text ? await copy(text) : true;
       setPreview([]);
-      setCopied(mode === "clipboard");
       setSuccess(true);
       setSuccessMessage(
-        mode === "clipboard"
+        copiedOk
           ? `已出库 ${payload.quantity} 条并复制到剪贴板`
-          : `已出库 ${payload.quantity} 条并下载 TXT`
+          : `已出库 ${payload.quantity} 条，复制失败请点重新复制`
       );
-      setMessage("");
       setReloadToken((token) => token + 1);
-      setTimeout(() => setCopied(false), 2000);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "FIFO 出库失败");
     } finally {
       setBusy(false);
     }
-  };
+  }
+
+  async function handleDownload() {
+    if (clamped === 0 || busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const payload = await commitFifo(quantity, fifoNotes);
+      remember(payload.clipboardText ?? "");
+      if (payload.clipboardText) {
+        downloadTextFile(payload.clipboardText);
+      }
+      setPreview([]);
+      setSuccess(true);
+      setSuccessMessage(`已出库 ${payload.quantity} 条并下载 TXT`);
+      setReloadToken((token) => token + 1);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "FIFO 出库失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCopy() {
+    setMessage("");
+    const ok = await copy();
+    if (!ok && clipboardText) {
+      setMessage("复制到剪贴板失败，请重试");
+    }
+  }
 
   const resetSuccess = () => {
     setSuccess(false);
     setSuccessMessage("");
     setQuantity(1);
+    clearClipboard();
     setReloadToken((token) => token + 1);
   };
 
@@ -152,6 +190,7 @@ export function QuickOutboundModal({
         setSuccessMessage("");
         setQuantity(1);
         setMessage("");
+        clearClipboard();
         setReloadToken(0);
       }}
       title={success ? "出库成功" : "快捷 FIFO 出库"}
@@ -164,10 +203,23 @@ export function QuickOutboundModal({
       footer={
         success ? (
           <>
+            <OutboundCopyButton
+              clipboardText={clipboardText}
+              copying={copying}
+              copied={copied}
+              onCopy={handleCopy}
+            />
             <Button variant="secondary" onClick={resetSuccess}>
               再次出库
             </Button>
-            <Button onClick={() => { resetSuccess(); onClose(); }}>完成</Button>
+            <Button
+              onClick={() => {
+                resetSuccess();
+                onClose();
+              }}
+            >
+              完成
+            </Button>
           </>
         ) : (
           <div className="flex w-full flex-wrap justify-end gap-2">
@@ -176,17 +228,24 @@ export function QuickOutboundModal({
             </Button>
             <Button
               variant="secondary"
-              onClick={() => handleOutbound("txt")}
+              onClick={() => void handleDownload()}
               disabled={max === 0 || clamped === 0 || busy}
             >
               <Download className="h-4 w-4" />
               下载 TXT
             </Button>
+            <OutboundCopyButton
+              clipboardText={clipboardText}
+              copying={copying}
+              copied={copied}
+              onCopy={handleCopy}
+              disabled={busy}
+            />
             <Button
-              onClick={() => handleOutbound("clipboard")}
+              onClick={() => void handleCommit()}
               disabled={max === 0 || clamped === 0 || busy}
             >
-              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              <Upload className="h-4 w-4" />
               出库并复制
             </Button>
           </div>
