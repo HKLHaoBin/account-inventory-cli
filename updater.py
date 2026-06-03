@@ -1017,7 +1017,7 @@ def handoff_to_direct_sidecar(args: argparse.Namespace, work_dir: Path) -> int:
     sidecar_exe = sidecar_dir / f"updater-direct-{int(time.time())}.exe"
     shutil.copy2(Path(sys.executable).resolve(), sidecar_exe)
     command = build_direct_sidecar_command(args, work_dir, sidecar_exe)
-    trace(work_dir, "main:handoff", sidecar=str(sidecar_exe), work_dir=str(work_dir), command=command)
+    trace(work_dir, "main:handoff", sidecar=str(sidecar_exe), install_work_dir=str(work_dir), command=command)
     completed = subprocess.run(command, cwd=str(work_dir))
     return int(completed.returncode)
 

@@ -16,3 +16,4 @@ data/updater-backups/
 web/node_modules/
 web/.next/
 web/out/
+.updater.log

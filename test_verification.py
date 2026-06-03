@@ -2649,6 +2649,56 @@ def test_updater_direct_sidecar_command_uses_install_work_dir() -> None:
     assert "--restore-watch" not in command
 
 
+def test_updater_direct_sidecar_handoff_logs_without_argument_collision() -> None:
+    import argparse
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work_dir = Path(tmp) / "install"
+        work_dir.mkdir()
+        updater_exe = work_dir / "updater.exe"
+        updater_exe.write_bytes(b"")
+
+        args = argparse.Namespace(
+            watch=False,
+            restore_watch=True,
+            interval_hours=24.0,
+            work_dir="",
+            backend_pid=123,
+            port=8000,
+            backend_mode="exe",
+            backend_executable=str(work_dir / "account-inventory-web.exe"),
+            backend_script="",
+            python_executable="",
+            repo="owner/repo",
+        )
+
+        run_result = mock.Mock(returncode=0)
+        with mock.patch.object(sys, "frozen", True, create=True), mock.patch.object(
+            sys, "executable", str(updater_exe)
+        ), mock.patch("shutil.copy2"), mock.patch(
+            "subprocess.run", return_value=run_result
+        ) as run_mock, mock.patch.object(
+            updater.time, "time", return_value=1
+        ):
+            result = updater.handoff_to_direct_sidecar(args, work_dir)
+
+        assert result == 0
+        log_path = work_dir / updater.LOG_FILE_NAME
+        assert log_path.exists()
+        log_text = log_path.read_text(encoding="utf-8")
+        assert "main:handoff" in log_text
+        assert "install_work_dir" in log_text
+        payload = json.loads(log_text.strip().splitlines()[-1])
+        assert payload["stage"] == "main:handoff"
+        assert payload["install_work_dir"] == str(work_dir)
+
+        run_mock.assert_called_once()
+        command = run_mock.call_args[0][0]
+        assert "--work-dir" in command
+        assert command[command.index("--work-dir") + 1] == str(work_dir)
+
+
 def test_updater_print_work_dir_exits_before_update() -> None:
     import updater
 
@@ -3120,6 +3170,7 @@ def run_all() -> tuple[int, list[str]]:
         ("updater frozen default work dir", test_updater_frozen_default_work_dir_is_exe_parent),
         ("updater rejects pyinstaller temp work dir", test_updater_rejects_pyinstaller_temp_work_dir),
         ("updater direct sidecar command", test_updater_direct_sidecar_command_uses_install_work_dir),
+        ("updater direct sidecar handoff", test_updater_direct_sidecar_handoff_logs_without_argument_collision),
         ("updater print work dir exits", test_updater_print_work_dir_exits_before_update),
         ("updater trace writes log", test_updater_trace_writes_log_file),
         ("updater one shot lock skip", test_updater_one_shot_lock_skip_writes_status_and_log),
