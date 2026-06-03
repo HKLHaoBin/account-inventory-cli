@@ -1875,6 +1875,168 @@ def test_api_reinbound_from_history_preserves_outbound_and_creates_inbound() -> 
     assert outbound_rows[0]["username"] == "rein_user"
 
 
+def test_outbound_from_inbound_history_in_inventory() -> None:
+    _reset_inventory()
+    db.insert_account("hist_out_user", "pw1", email="out@test.com")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("hist_out_user",),
+        ).fetchone()["inbound_record_id"]
+    assert db.exists_in_inventory("hist_out_user")
+
+    row = db.outbound_from_inbound_history(inbound_id)
+
+    assert not db.exists_in_inventory("hist_out_user")
+    assert db.count_outbound_records() == 1
+    assert row["username"] == "hist_out_user"
+    assert row["inbound_record_id"] == inbound_id
+    with db._connect() as conn:
+        deleted = conn.execute(
+            "SELECT 1 FROM accounts WHERE inbound_record_id = ?",
+            (inbound_id,),
+        ).fetchone()
+        assert deleted is None
+
+
+def test_outbound_from_inbound_history_not_in_inventory() -> None:
+    _reset_inventory()
+    db.insert_account("gone_user", "pw1")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("gone_user",),
+        ).fetchone()["inbound_record_id"]
+        conn.execute("DELETE FROM accounts WHERE username = ?", ("gone_user",))
+    assert not db.exists_in_inventory("gone_user")
+    outbound_before = db.count_outbound_records()
+
+    row = db.outbound_from_inbound_history(inbound_id)
+
+    assert db.count_outbound_records() == outbound_before + 1
+    assert row["inbound_record_id"] == inbound_id
+    assert row["username"] == "gone_user"
+
+
+def test_outbound_from_inbound_history_already_outbound() -> None:
+    _reset_inventory()
+    db.insert_account("dup_out", "pw1")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("dup_out",),
+        ).fetchone()["inbound_record_id"]
+    db.outbound_by_username("dup_out")
+
+    try:
+        db.outbound_from_inbound_history(inbound_id)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "已出库" in str(exc)
+
+
+def test_api_outbound_from_inbound_history() -> None:
+    _reset_inventory()
+    client = _api_client()
+    db.insert_account("api_hist_out", "pw1", email="api@test.com", url="https://x.com")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("api_hist_out",),
+        ).fetchone()["inbound_record_id"]
+
+    response = client.post(f"/api/inbound/history/{inbound_id}/outbound")
+    assert response.status_code == 200
+    payload = response.json()
+    expected = format_account("api_hist_out", "pw1", "api@test.com", None, "https://x.com")
+    assert payload["clipboardText"] == expected
+    assert payload["record"]["username"] == "api_hist_out"
+    assert payload["record"]["inboundRecordId"] == str(inbound_id)
+    assert not db.exists_in_inventory("api_hist_out")
+
+
+def test_api_outbound_from_inbound_history_already_outbound() -> None:
+    _reset_inventory()
+    client = _api_client()
+    db.insert_account("api_dup_out", "pw1")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("api_dup_out",),
+        ).fetchone()["inbound_record_id"]
+    db.outbound_by_username("api_dup_out")
+
+    response = client.post(f"/api/inbound/history/{inbound_id}/outbound")
+    assert response.status_code == 400
+    assert "已出库" in response.json()["detail"]
+
+
+def test_api_reinbound_from_history_clipboard_text() -> None:
+    _reset_inventory()
+    client = _api_client()
+    db.insert_account("clip_rein", "pw1", email="clip@test.com")
+    db.outbound_by_username("clip_rein")
+    record_id = db.list_outbound_history()[0]["id"]
+    outbound_before = db.count_outbound_records()
+
+    response = client.post(f"/api/outbound/history/{record_id}/reinbound")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["clipboardText"] == format_account(
+        "clip_rein", "pw1", "clip@test.com", None, None
+    )
+    assert payload["account"]["username"] == "clip_rein"
+    assert db.count_outbound_records() == outbound_before
+
+
+def test_history_shortcut_notes_searchable() -> None:
+    _reset_inventory()
+    client = _api_client()
+    db.insert_account("note_shortcut", "pw1")
+    db.set_account_note("note_shortcut", "快捷标签")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("note_shortcut",),
+        ).fetchone()["inbound_record_id"]
+
+    outbound = client.post(f"/api/inbound/history/{inbound_id}/outbound")
+    assert outbound.status_code == 200
+
+    inbound_rows = db.list_inbound_history(query="快捷标签")
+    outbound_rows = db.list_outbound_history(query="快捷标签")
+    assert any(row["username"] == "note_shortcut" for row in inbound_rows)
+    assert any(row["username"] == "note_shortcut" for row in outbound_rows)
+
+    db.insert_outbound_record("note_rein", "pw2")
+    db.set_account_note("note_rein", "重新入库标签")
+    rein_id = db.list_outbound_history(query="note_rein")[0]["id"]
+    reinbound = client.post(f"/api/outbound/history/{rein_id}/reinbound")
+    assert reinbound.status_code == 200
+    assert db.search_inventory("重新入库标签")
+
+
+def test_list_inbound_history_has_outbound() -> None:
+    _reset_inventory()
+    db.insert_account("has_out_flag", "pw1")
+    with db._connect() as conn:
+        inbound_id = conn.execute(
+            "SELECT inbound_record_id FROM accounts WHERE username = ?",
+            ("has_out_flag",),
+        ).fetchone()["inbound_record_id"]
+    db.insert_account("no_out_flag", "pw2")
+
+    rows_before = {row["username"]: row for row in db.list_inbound_history()}
+    assert rows_before["has_out_flag"]["has_outbound"] is False
+    assert rows_before["no_out_flag"]["has_outbound"] is False
+
+    db.outbound_by_username("has_out_flag")
+    rows_after = {row["username"]: row for row in db.list_inbound_history()}
+    assert rows_after["has_out_flag"]["has_outbound"] is True
+    assert rows_after["no_out_flag"]["has_outbound"] is False
+
+
 def test_migrate_inbound_history_backfill() -> None:
     _reset_inventory()
     with db._connect() as conn:
@@ -3142,6 +3304,29 @@ def run_all() -> tuple[int, list[str]]:
             "api reinbound preserves outbound history",
             test_api_reinbound_from_history_preserves_outbound_and_creates_inbound,
         ),
+        (
+            "outbound from inbound history in inventory",
+            test_outbound_from_inbound_history_in_inventory,
+        ),
+        (
+            "outbound from inbound history not in inventory",
+            test_outbound_from_inbound_history_not_in_inventory,
+        ),
+        (
+            "outbound from inbound history already outbound",
+            test_outbound_from_inbound_history_already_outbound,
+        ),
+        ("api outbound from inbound history", test_api_outbound_from_inbound_history),
+        (
+            "api outbound from inbound history duplicate",
+            test_api_outbound_from_inbound_history_already_outbound,
+        ),
+        (
+            "api reinbound clipboard text",
+            test_api_reinbound_from_history_clipboard_text,
+        ),
+        ("history shortcut notes searchable", test_history_shortcut_notes_searchable),
+        ("list inbound history has outbound", test_list_inbound_history_has_outbound),
         ("migrate inbound history", test_migrate_inbound_history_backfill),
         ("outbound inbound_record_id paths", test_outbound_paths_set_inbound_record_id),
         ("history filters parse dates", test_history_filters_parse_dates),

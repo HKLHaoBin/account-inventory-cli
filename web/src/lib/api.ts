@@ -14,10 +14,12 @@ import type {
   InboundRecord,
   InventoryPayload,
   OutboundByUsernamePayload,
+  OutboundFromInboundHistoryPayload,
   OutboundHistoryPayload,
   OutboundRecord,
   OutboundPasteCommitPayload,
   OutboundPasteRow,
+  ReinboundFromHistoryPayload,
   SearchPayload,
   SearchResult,
   SeparatorRule,
@@ -184,11 +186,38 @@ function resolveOutboundHistoryRecordId(
 
 export async function commitReInboundFromHistory(
   record: OutboundRecord | HistoryRecord
-): Promise<void> {
+): Promise<ReinboundFromHistoryPayload> {
   const recordId = resolveOutboundHistoryRecordId(record);
-  await requestJson(`/api/outbound/history/${encodeURIComponent(recordId)}/reinbound`, {
-    method: "POST",
-  });
+  return requestJson<ReinboundFromHistoryPayload>(
+    `/api/outbound/history/${encodeURIComponent(recordId)}/reinbound`,
+    {
+      method: "POST",
+    }
+  );
+}
+
+function resolveInboundHistoryRecordId(
+  record: InboundRecord | HistoryRecord
+): string {
+  if ("type" in record && record.type === "inbound") {
+    const prefix = "inbound-";
+    if (record.id.startsWith(prefix)) {
+      return record.id.slice(prefix.length);
+    }
+  }
+  return record.id;
+}
+
+export function commitOutboundFromInboundHistory(
+  record: InboundRecord | HistoryRecord
+): Promise<OutboundFromInboundHistoryPayload> {
+  const recordId = resolveInboundHistoryRecordId(record);
+  return requestJson<OutboundFromInboundHistoryPayload>(
+    `/api/inbound/history/${encodeURIComponent(recordId)}/outbound`,
+    {
+      method: "POST",
+    }
+  );
 }
 
 export function previewFifo(quantity: number): Promise<FifoPreviewPayload> {

@@ -12,8 +12,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/input";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
+import {
+  applyBatchNoteToRows,
+  mergeCommitResultRowsIntoMap,
+} from "@/components/notes/note-overwrite-logic";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useCategoryStatusFilter } from "@/hooks/use-category-status-filter";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import { commitOutboundPaste, writeAppClipboardText } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
@@ -102,6 +107,9 @@ export default function OutboundPastePage() {
   const [clipboardState, setClipboardState] = useState("连接剪贴板检测中");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [batchNote, setBatchNote] = useState("");
+  const { listRef, selected, matches, toggle } =
+    useCategoryStatusFilter<OutboundPasteCategory>();
   const {
     clipboardText,
     remember,
@@ -213,7 +221,12 @@ export default function OutboundPastePage() {
     );
   }, [displayedRows]);
 
-  const commitRows = displayedRows
+  const filteredRows = useMemo(
+    () => displayedRows.filter((row) => matches(row.category)),
+    [displayedRows, matches]
+  );
+
+  const commitRows = filteredRows
     .filter((row) => !row.status)
     .map((row) => ({
       clientId: row.clientId,
@@ -223,14 +236,34 @@ export default function OutboundPastePage() {
     }));
 
   async function handleConfirm() {
-    if (commitRows.length === 0) return;
+    const rowsWithNotes = applyBatchNoteToRows(draftRows, batchNote);
+    setDraftRows(rowsWithNotes);
+
+    const nextDisplayed = rowsWithNotes
+      .filter((row) => !deletedIds.has(row.clientId))
+      .map((row) => resultRows.get(row.clientId) ?? row);
+    const toCommit = nextDisplayed
+      .filter((row) => matches(row.category))
+      .filter((row) => !row.status)
+      .map((row) => ({
+        clientId: row.clientId,
+        line: row.line,
+        note: row.note,
+        overwriteNote: row.overwriteNote,
+      }));
+
+    if (toCommit.length === 0) return;
     setBusy(true);
     setMessage("");
     try {
-      const payload = await commitOutboundPaste(commitRows);
-      const nextRows = new Map(payload.rows.map((row) => [row.clientId, row]));
+      const payload = await commitOutboundPaste(toCommit);
+      const nextRows = mergeCommitResultRowsIntoMap(
+        resultRowsRef.current,
+        payload.rows
+      );
       resultRowsRef.current = nextRows;
       setResultRows(nextRows);
+      setBatchNote("");
       const text = payload.clipboardText ?? "";
       remember(text);
       const copiedOk = text ? await copy(text) : true;
@@ -311,7 +344,17 @@ export default function OutboundPastePage() {
           <div className="flex flex-wrap gap-2">
             {(Object.keys(CATEGORY_LABELS) as OutboundPasteCategory[]).map(
               (category) => (
-                <Badge key={category} variant={categoryBadge(category)}>
+                <Badge
+                  key={category}
+                  role="button"
+                  aria-pressed={selected.has(category)}
+                  variant={categoryBadge(category)}
+                  className={cn(
+                    "cursor-pointer select-none transition-shadow",
+                    selected.has(category) && "ring-2 ring-primary/50 ring-offset-1"
+                  )}
+                  onClick={() => toggle(category)}
+                >
                   {CATEGORY_LABELS[category]} {counts[category]}
                 </Badge>
               )
@@ -321,9 +364,12 @@ export default function OutboundPastePage() {
           <BatchNoteControls
             rows={draftRows}
             onRowsChange={setDraftRows}
+            batchNote={batchNote}
+            onBatchNoteChange={setBatchNote}
             disabled={busy || rulesLoading || !!rulesError}
           />
 
+          <div ref={listRef} className="scroll-mt-4 space-y-2">
           <div className="hidden overflow-x-auto rounded-xl border border-border md:block">
             <table className="w-full text-sm">
               <thead>
@@ -339,14 +385,14 @@ export default function OutboundPastePage() {
                 </tr>
               </thead>
               <tbody>
-                {displayedRows.length === 0 ? (
+                {filteredRows.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">
                       输入账号文本后会转换为表格
                     </td>
                   </tr>
                 ) : (
-                  displayedRows.map((row) => (
+                  filteredRows.map((row) => (
                     <tr
                       key={row.clientId}
                       className={cn("border-b border-border last:border-0", rowTone(row))}
@@ -408,12 +454,12 @@ export default function OutboundPastePage() {
           </div>
 
           <div className="space-y-2 md:hidden">
-            {displayedRows.length === 0 ? (
+            {filteredRows.length === 0 ? (
               <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
                 输入账号文本后会转换为表格
               </p>
             ) : (
-              displayedRows.map((row) => (
+              filteredRows.map((row) => (
                 <div
                   key={`${row.clientId}-mobile`}
                   className={cn(
@@ -479,6 +525,7 @@ export default function OutboundPastePage() {
                 </div>
               ))
             )}
+          </div>
           </div>
         </CardContent>
       </Card>

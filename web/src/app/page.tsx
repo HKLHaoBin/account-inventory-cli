@@ -19,8 +19,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/input";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
+import {
+  applyBatchNoteToRows,
+  buildInboundVisibleRows,
+  mergeCommitResultRowsIntoMap,
+} from "@/components/notes/note-overwrite-logic";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { useCategoryStatusFilter } from "@/hooks/use-category-status-filter";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
   commitFifo,
@@ -386,6 +392,9 @@ export default function DashboardPage() {
   const [fifoBusy, setFifoBusy] = useState(false);
   const [fifoMessage, setFifoMessage] = useState("");
   const [fifoNotes, setFifoNotes] = useState<FifoNoteEntry[]>([]);
+  const [batchNote, setBatchNote] = useState("");
+  const { listRef, selected, matches, toggle } =
+    useCategoryStatusFilter<InboundCountKey>();
   const {
     clipboardText: fifoClipboardText,
     remember: rememberFifoClipboard,
@@ -573,11 +582,10 @@ export default function DashboardPage() {
     clearFifoClipboard();
   }, [fifoQuantity, clearFifoClipboard]);
 
-  const displayedRows = useMemo(() => {
-    return previewRows
-      .filter((row) => !deletedIds.has(row.clientId))
-      .map((row) => resultRows.get(row.clientId) ?? row);
-  }, [deletedIds, previewRows, resultRows]);
+  const displayedRows = useMemo(
+    () => buildInboundVisibleRows(previewRows, deletedIds, resultRows),
+    [deletedIds, previewRows, resultRows]
+  );
 
   const pendingRows = useMemo(
     () => displayedRows.filter((row) => displayCategory(row) === "pending"),
@@ -601,7 +609,12 @@ export default function DashboardPage() {
     );
   }, [displayedRows]);
 
-  const commitRows = displayedRows
+  const filteredRows = useMemo(
+    () => displayedRows.filter((row) => matches(displayCategory(row))),
+    [displayedRows, matches]
+  );
+
+  const commitRows = filteredRows
     .filter((row) => canCommitRow(row, approvedPendingIds))
     .map((row) => ({
       clientId: row.clientId,
@@ -674,17 +687,38 @@ export default function DashboardPage() {
   }
 
   async function handleInboundCommit() {
-    if (commitRows.length === 0) return;
+    const rowsWithNotes = applyBatchNoteToRows(previewRows, batchNote);
+    setPreviewRows(rowsWithNotes);
+
+    const nextDisplayed = buildInboundVisibleRows(
+      rowsWithNotes,
+      deletedIds,
+      resultRowsRef.current
+    );
+    const toCommit = nextDisplayed
+      .filter((row) => matches(displayCategory(row)))
+      .filter((row) => canCommitRow(row, approvedPendingIds))
+      .map((row) => ({
+        clientId: row.clientId,
+        line: row.line,
+        note: row.note,
+        overwriteNote: row.overwriteNote,
+      }));
+
+    if (toCommit.length === 0) return;
     setInboundBusy(true);
     try {
       const payload = await commitInbound(
-        commitRows,
+        toCommit,
         Array.from(approvedPendingIds)
       );
-      const nextResultRows = new Map(resultRowsRef.current);
-      for (const row of payload.rows) nextResultRows.set(row.clientId, row);
+      const nextResultRows = mergeCommitResultRowsIntoMap(
+        resultRowsRef.current,
+        payload.rows
+      );
       resultRowsRef.current = nextResultRows;
       setResultRows(nextResultRows);
+      setBatchNote("");
       await loadDashboard();
       setFifoQuantity((current) => Math.max(1, current));
     } catch (error) {
@@ -942,7 +976,17 @@ export default function DashboardPage() {
 
             <div className="flex flex-wrap gap-2">
               {(Object.keys(COUNT_LABELS) as InboundCountKey[]).map((category) => (
-                <Badge key={category} variant={categoryBadge(category)}>
+                <Badge
+                  key={category}
+                  role="button"
+                  aria-pressed={selected.has(category)}
+                  variant={categoryBadge(category)}
+                  className={cn(
+                    "cursor-pointer select-none transition-shadow",
+                    selected.has(category) && "ring-2 ring-primary/50 ring-offset-1"
+                  )}
+                  onClick={() => toggle(category)}
+                >
                   {COUNT_LABELS[category]} {counts[category]}
                 </Badge>
               ))}
@@ -956,6 +1000,8 @@ export default function DashboardPage() {
             <BatchNoteControls
               rows={previewRows}
               onRowsChange={setPreviewRows}
+              batchNote={batchNote}
+              onBatchNoteChange={setBatchNote}
               disabled={inboundBusy || rulesLoading || !!rulesError}
             />
 
@@ -1002,6 +1048,7 @@ export default function DashboardPage() {
               </span>
             </div>
 
+            <div ref={listRef} className="scroll-mt-4 space-y-2">
             <div className="hidden overflow-x-auto rounded-xl border border-border lg:block">
               <table className="w-full text-sm">
                 <thead>
@@ -1018,14 +1065,14 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {displayedRows.length === 0 ? (
+                  {filteredRows.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
                         输入账号文本后会自动转换为表格
                       </td>
                     </tr>
                   ) : (
-                    displayedRows.map((row) => {
+                    filteredRows.map((row) => {
                       const category = displayCategory(row);
                       const isPending = category === "pending";
                       const isKeyboardCursor = row.clientId === pendingCursorId;
@@ -1127,12 +1174,12 @@ export default function DashboardPage() {
             </div>
 
             <div className="space-y-2 lg:hidden">
-              {displayedRows.length === 0 ? (
+              {filteredRows.length === 0 ? (
                 <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
                   输入账号文本后会自动转换为表格
                 </p>
               ) : (
-                displayedRows.map((row) => {
+                filteredRows.map((row) => {
                   const category = displayCategory(row);
                   const isPending = category === "pending";
                   const isKeyboardCursor = row.clientId === pendingCursorId;
@@ -1235,6 +1282,7 @@ export default function DashboardPage() {
                   );
                 })
               )}
+            </div>
             </div>
           </CardContent>
         </Card>

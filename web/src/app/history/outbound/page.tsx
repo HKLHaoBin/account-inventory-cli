@@ -7,6 +7,7 @@ import {
   commitReInboundFromHistory,
   fetchInventory,
   fetchOutboundHistory,
+  writeAppClipboardText,
 } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import type { DateRangeFilter, HistoryRecord, OutboundRecord } from "@/types/account";
@@ -73,7 +74,8 @@ export default function OutboundHistoryPage() {
 
   const handleReInbound = useCallback(
     async (record: OutboundRecord | HistoryRecord) => {
-      await commitReInboundFromHistory(record);
+      const payload = await commitReInboundFromHistory(record);
+      await writeAppClipboardText(payload.clipboardText);
       setReloadToken((value) => value + 1);
     },
     []

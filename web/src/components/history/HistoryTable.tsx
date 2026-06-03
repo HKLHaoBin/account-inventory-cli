@@ -31,6 +31,9 @@ interface HistoryTableProps {
   onRetry?: () => void;
   inventoryUsernames?: Set<string>;
   onReInbound?: (record: OutboundRecord | HistoryRecord) => Promise<void>;
+  onOutboundFromInbound?: (
+    record: InboundRecord | HistoryRecord
+  ) => Promise<void>;
 }
 
 type HistoryCopyRecord = Parameters<typeof formatHistoryRecordLine>[0];
@@ -55,6 +58,19 @@ function isOutboundRecord(
   return "outboundAt" in record;
 }
 
+function isInboundHistoryRecord(
+  record: HistoryRecord | InboundRecord | OutboundRecord
+): record is InboundRecord | HistoryRecord {
+  if (modeIsInboundOnly(record)) return true;
+  return isHistoryRecord(record) && record.type === "inbound";
+}
+
+function modeIsInboundOnly(
+  record: HistoryRecord | InboundRecord | OutboundRecord
+): record is InboundRecord {
+  return "inboundAt" in record && !("outboundAt" in record) && !("type" in record);
+}
+
 function canReInbound(
   record: HistoryRecord | InboundRecord | OutboundRecord,
   mode: HistoryTableMode,
@@ -65,25 +81,54 @@ function canReInbound(
   return isHistoryRecord(record) && record.type === "outbound";
 }
 
+function canOutboundFromInbound(
+  record: HistoryRecord | InboundRecord | OutboundRecord,
+  mode: HistoryTableMode,
+  onOutboundFromInbound?: HistoryTableProps["onOutboundFromInbound"]
+): record is InboundRecord | HistoryRecord {
+  if (!onOutboundFromInbound || mode === "outbound") return false;
+  if (mode === "inbound") return true;
+  return isHistoryRecord(record) && record.type === "inbound";
+}
+
+function recordHasOutbound(
+  record: InboundRecord | HistoryRecord
+): boolean {
+  return Boolean(record.hasOutbound);
+}
+
 function RowActions({
   record,
   mode,
   inventoryUsernames,
   onReInbound,
+  onOutboundFromInbound,
   busyId,
   rowErrors,
   onReInboundClick,
+  onOutboundFromInboundClick,
 }: {
   record: HistoryRecord | InboundRecord | OutboundRecord;
   mode: HistoryTableMode;
   inventoryUsernames?: Set<string>;
   onReInbound?: HistoryTableProps["onReInbound"];
+  onOutboundFromInbound?: HistoryTableProps["onOutboundFromInbound"];
   busyId: string | null;
   rowErrors: Record<string, string>;
   onReInboundClick: (record: OutboundRecord | HistoryRecord) => void;
+  onOutboundFromInboundClick: (record: InboundRecord | HistoryRecord) => void;
 }) {
   const showReInbound = canReInbound(record, mode, onReInbound);
+  const showOutboundFromInbound = canOutboundFromInbound(
+    record,
+    mode,
+    onOutboundFromInbound
+  );
   const inInventory = inventoryUsernames?.has(record.username) ?? false;
+  const hasOutbound =
+    showOutboundFromInbound && isInboundHistoryRecord(record)
+      ? recordHasOutbound(record)
+      : false;
   const isBusy = busyId === record.id;
   const rowError = rowErrors[record.id];
 
@@ -99,7 +144,19 @@ function RowActions({
             title={inInventory ? "已在库存" : undefined}
             onClick={() => onReInboundClick(record)}
           >
-            {isBusy ? "入库中…" : "重新入库"}
+            {isBusy ? "入库中…" : "入库"}
+          </Button>
+        )}
+        {showOutboundFromInbound && (
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 px-2 text-xs"
+            disabled={hasOutbound || isBusy || Boolean(busyId)}
+            title={hasOutbound ? "该入库记录已出库" : undefined}
+            onClick={() => onOutboundFromInboundClick(record)}
+          >
+            {isBusy ? "出库中…" : "出库"}
           </Button>
         )}
         <Button
@@ -130,6 +187,7 @@ export function HistoryTable({
   onRetry,
   inventoryUsernames,
   onReInbound,
+  onOutboundFromInbound,
 }: HistoryTableProps) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
@@ -150,8 +208,29 @@ export function HistoryTable({
     } catch (err) {
       setRowErrors((current) => ({
         ...current,
-        [record.id]:
-          err instanceof Error ? err.message : "重新入库失败",
+        [record.id]: err instanceof Error ? err.message : "入库失败",
+      }));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleOutboundFromInboundClick(
+    record: InboundRecord | HistoryRecord
+  ) {
+    if (!onOutboundFromInbound || busyId) return;
+    setBusyId(record.id);
+    setRowErrors((current) => {
+      const next = { ...current };
+      delete next[record.id];
+      return next;
+    });
+    try {
+      await onOutboundFromInbound(record);
+    } catch (err) {
+      setRowErrors((current) => ({
+        ...current,
+        [record.id]: err instanceof Error ? err.message : "出库失败",
       }));
     } finally {
       setBusyId(null);
@@ -280,9 +359,13 @@ export function HistoryTable({
                               mode={mode}
                               inventoryUsernames={inventoryUsernames}
                               onReInbound={onReInbound}
+                              onOutboundFromInbound={onOutboundFromInbound}
                               busyId={busyId}
                               rowErrors={rowErrors}
                               onReInboundClick={handleReInboundClick}
+                              onOutboundFromInboundClick={
+                                handleOutboundFromInboundClick
+                              }
                             />
                           </td>
                           {mode === "all" && history && (
@@ -357,9 +440,13 @@ export function HistoryTable({
                           mode={mode}
                           inventoryUsernames={inventoryUsernames}
                           onReInbound={onReInbound}
+                          onOutboundFromInbound={onOutboundFromInbound}
                           busyId={busyId}
                           rowErrors={rowErrors}
                           onReInboundClick={handleReInboundClick}
+                          onOutboundFromInboundClick={
+                            handleOutboundFromInboundClick
+                          }
                         />
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex flex-wrap items-center gap-2">

@@ -69,6 +69,7 @@ class InboundRecordPayload(BaseModel):
     url: str | None = None
     inboundAt: str
     note: str | None = None
+    hasOutbound: bool = False
 
 
 class HistoryRecordPayload(BaseModel):
@@ -83,6 +84,7 @@ class HistoryRecordPayload(BaseModel):
     outboundAt: str | None = None
     timestamp: str
     note: str | None = None
+    hasOutbound: bool = False
 
 
 class InboundHistoryPayload(BaseModel):
@@ -110,6 +112,12 @@ class OutboundHistoryPayload(BaseModel):
 
 class ReinboundFromHistoryPayload(BaseModel):
     account: AccountPayload
+    clipboardText: str
+
+
+class OutboundFromInboundHistoryPayload(BaseModel):
+    record: OutboundRecordPayload
+    clipboardText: str
 
 
 class InventoryPayload(BaseModel):
@@ -366,6 +374,7 @@ def _inbound_record_payload(row: dict) -> InboundRecordPayload:
         url=row["url"],
         inboundAt=row["inbound_at"],
         note=row.get("note") or "",
+        hasOutbound=bool(row.get("has_outbound")),
     )
 
 
@@ -387,6 +396,7 @@ def _history_record_payload(row: dict) -> HistoryRecordPayload:
         outboundAt=row.get("outbound_at"),
         timestamp=row["timestamp"],
         note=row.get("note") or "",
+        hasOutbound=bool(row.get("has_outbound")) if record_type == "inbound" else False,
     )
 
 
@@ -742,7 +752,27 @@ def reinbound_from_outbound_history(record_id: int) -> ReinboundFromHistoryPaylo
     return ReinboundFromHistoryPayload(
         account=_account_payload(
             {**account_row, "created_at": account_row["created_at"]}
-        )
+        ),
+        clipboardText=_format_account_row(row),
+    )
+
+
+@app.post(
+    "/api/inbound/history/{record_id}/outbound",
+    response_model=OutboundFromInboundHistoryPayload,
+)
+def outbound_from_inbound_history(record_id: int) -> OutboundFromInboundHistoryPayload:
+    try:
+        row = db.outbound_from_inbound_history(record_id)
+    except ValueError as exc:
+        message = str(exc)
+        if "不存在" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=400, detail=message) from exc
+
+    return OutboundFromInboundHistoryPayload(
+        record=_outbound_record_payload(row),
+        clipboardText=_format_account_row(row),
     )
 
 

@@ -3,9 +3,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { HistoryFilters } from "@/components/history/HistoryFilters";
 import { HistoryTable } from "@/components/history/HistoryTable";
-import { commitReInboundFromHistory, fetchInventory, fetchUnifiedHistory } from "@/lib/api";
+import {
+  commitOutboundFromInboundHistory,
+  commitReInboundFromHistory,
+  fetchInventory,
+  fetchUnifiedHistory,
+  writeAppClipboardText,
+} from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
-import type { DateRangeFilter, HistoryRecord, OutboundRecord } from "@/types/account";
+import type { DateRangeFilter, HistoryRecord, InboundRecord, OutboundRecord } from "@/types/account";
 
 export default function HistoryPage() {
   const [query, setQuery] = useState("");
@@ -70,7 +76,17 @@ export default function HistoryPage() {
 
   const handleReInbound = useCallback(
     async (record: OutboundRecord | HistoryRecord) => {
-      await commitReInboundFromHistory(record);
+      const payload = await commitReInboundFromHistory(record);
+      await writeAppClipboardText(payload.clipboardText);
+      setReloadToken((value) => value + 1);
+    },
+    []
+  );
+
+  const handleOutboundFromInbound = useCallback(
+    async (record: InboundRecord | HistoryRecord) => {
+      const payload = await commitOutboundFromInboundHistory(record);
+      await writeAppClipboardText(payload.clipboardText);
       setReloadToken((value) => value + 1);
     },
     []
@@ -97,6 +113,7 @@ export default function HistoryPage() {
         onRetry={retry}
         inventoryUsernames={inventoryUsernames}
         onReInbound={handleReInbound}
+        onOutboundFromInbound={handleOutboundFromInbound}
       />
     </div>
   );

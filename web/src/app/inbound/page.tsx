@@ -13,7 +13,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/input";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
+import {
+  applyBatchNoteToRows,
+  buildInboundVisibleRows,
+  mergeCommitResultRowsIntoMap,
+} from "@/components/notes/note-overwrite-logic";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import { useCategoryStatusFilter } from "@/hooks/use-category-status-filter";
 import { commitInbound, writeAppClipboardText } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
@@ -138,6 +144,9 @@ export default function InboundPage() {
   const [clipboardState, setClipboardState] = useState("连接剪贴板检测中");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [batchNote, setBatchNote] = useState("");
+  const { listRef, selected, matches, toggle } =
+    useCategoryStatusFilter<InboundCountKey>();
 
   const resetForText = useCallback((value: string) => {
     textRef.current = value;
@@ -224,10 +233,7 @@ export default function InboundPage() {
   }
 
   const displayedRows = useMemo(
-    () =>
-      draftRows
-        .filter((row) => !deletedIds.has(row.clientId))
-        .map((row) => resultRows.get(row.clientId) ?? row),
+    () => buildInboundVisibleRows(draftRows, deletedIds, resultRows),
     [deletedIds, draftRows, resultRows]
   );
 
@@ -248,7 +254,12 @@ export default function InboundPage() {
     );
   }, [displayedRows]);
 
-  const commitRows = displayedRows
+  const filteredRows = useMemo(
+    () => displayedRows.filter((row) => matches(displayCategory(row))),
+    [displayedRows, matches]
+  );
+
+  const commitRows = filteredRows
     .filter((row) => canCommitRow(row, approvedPendingIds))
     .map((row) => ({
       clientId: row.clientId,
@@ -259,15 +270,36 @@ export default function InboundPage() {
   const approvedCount = commitRows.length;
 
   async function handleConfirm() {
-    if (commitRows.length === 0) return;
+    const rowsWithNotes = applyBatchNoteToRows(draftRows, batchNote);
+    setDraftRows(rowsWithNotes);
+
+    const nextDisplayed = buildInboundVisibleRows(
+      rowsWithNotes,
+      deletedIds,
+      resultRows
+    );
+    const toCommit = nextDisplayed
+      .filter((row) => matches(displayCategory(row)))
+      .filter((row) => canCommitRow(row, approvedPendingIds))
+      .map((row) => ({
+        clientId: row.clientId,
+        line: row.line,
+        note: row.note,
+        overwriteNote: row.overwriteNote,
+      }));
+
+    if (toCommit.length === 0) return;
     setBusy(true);
     setMessage("");
     try {
-      const payload = await commitInbound(commitRows, Array.from(approvedPendingIds));
-      const nextRows = new Map(resultRowsRef.current);
-      for (const row of payload.rows) nextRows.set(row.clientId, row);
+      const payload = await commitInbound(toCommit, Array.from(approvedPendingIds));
+      const nextRows = mergeCommitResultRowsIntoMap(
+        resultRowsRef.current,
+        payload.rows
+      );
       resultRowsRef.current = nextRows;
       setResultRows(nextRows);
+      setBatchNote("");
       setMessage(
         `入库完成：成功 ${payload.successCount} 条，失败 ${payload.errorCount} 条，待确认 ${payload.warningCount} 条`
       );
@@ -343,7 +375,17 @@ export default function InboundPage() {
 
           <div className="flex flex-wrap gap-2">
             {(Object.keys(COUNT_LABELS) as InboundCountKey[]).map((category) => (
-              <Badge key={category} variant={categoryBadge(category)}>
+              <Badge
+                key={category}
+                role="button"
+                aria-pressed={selected.has(category)}
+                variant={categoryBadge(category)}
+                className={cn(
+                  "cursor-pointer select-none transition-shadow",
+                  selected.has(category) && "ring-2 ring-primary/50 ring-offset-1"
+                )}
+                onClick={() => toggle(category)}
+              >
                 {COUNT_LABELS[category]} {counts[category]}
               </Badge>
             ))}
@@ -352,9 +394,12 @@ export default function InboundPage() {
           <BatchNoteControls
             rows={draftRows}
             onRowsChange={setDraftRows}
+            batchNote={batchNote}
+            onBatchNoteChange={setBatchNote}
             disabled={busy || rulesLoading || !!rulesError}
           />
 
+          <div ref={listRef} className="scroll-mt-4 space-y-2">
           <div className="hidden overflow-x-auto rounded-xl border border-border md:block">
             <table className="w-full text-sm">
               <thead>
@@ -371,14 +416,14 @@ export default function InboundPage() {
                 </tr>
               </thead>
               <tbody>
-                {displayedRows.length === 0 ? (
+                {filteredRows.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
                       输入账号文本后会转换为表格
                     </td>
                   </tr>
                 ) : (
-                  displayedRows.map((row) => {
+                  filteredRows.map((row) => {
                     const category = displayCategory(row);
                     return (
                       <tr
@@ -464,12 +509,12 @@ export default function InboundPage() {
           </div>
 
           <div className="space-y-2 md:hidden">
-            {displayedRows.length === 0 ? (
+            {filteredRows.length === 0 ? (
               <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
                 输入账号文本后会转换为表格
               </p>
             ) : (
-              displayedRows.map((row) => {
+              filteredRows.map((row) => {
                 const category = displayCategory(row);
                 const isPending = category === "pending";
                 return (
@@ -561,6 +606,7 @@ export default function InboundPage() {
                 );
               })
             )}
+          </div>
           </div>
         </CardContent>
       </Card>

@@ -15,14 +15,20 @@ type BatchNoteControlsProps<T extends NoteRow> = {
   rows: T[];
   onRowsChange: (rows: T[]) => void;
   disabled?: boolean;
+  batchNote?: string;
+  onBatchNoteChange?: (value: string) => void;
 };
 
 export function BatchNoteControls<T extends NoteRow>({
   rows,
   onRowsChange,
   disabled = false,
+  batchNote: batchNoteProp,
+  onBatchNoteChange,
 }: BatchNoteControlsProps<T>) {
-  const [batchNote, setBatchNote] = useState("");
+  const [internalBatchNote, setInternalBatchNote] = useState("");
+  const batchNote = batchNoteProp ?? internalBatchNote;
+  const setBatchNote = onBatchNoteChange ?? setInternalBatchNote;
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
 
   function fillEmptyNotes() {

@@ -31,6 +31,7 @@ export interface InboundRecord {
   url?: string;
   inboundAt: string;
   note?: string | null;
+  hasOutbound?: boolean;
 }
 
 export type HistoryType = "inbound" | "outbound";
@@ -52,6 +53,7 @@ export interface HistoryRecord {
   outboundAt?: string;
   timestamp: string;
   note?: string | null;
+  hasOutbound?: boolean;
 }
 
 export interface ParsedAccount {
@@ -245,6 +247,16 @@ export interface FifoCommitPayload extends FifoPreviewPayload {
 
 export interface OutboundByUsernamePayload {
   account: Account;
+  clipboardText: string;
+}
+
+export interface ReinboundFromHistoryPayload {
+  account: Account;
+  clipboardText: string;
+}
+
+export interface OutboundFromInboundHistoryPayload {
+  record: OutboundRecord;
   clipboardText: string;
 }
 

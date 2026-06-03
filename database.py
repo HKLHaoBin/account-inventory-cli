@@ -834,7 +834,7 @@ def list_recent_activities(limit: int = 10) -> list[dict[str, Any]]:
 
 
 def _row_to_inbound_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    result = {
         "id": row["id"],
         "username": row["username"],
         "password": row["password"],
@@ -844,6 +844,9 @@ def _row_to_inbound_dict(row: sqlite3.Row) -> dict[str, Any]:
         "inbound_at": row["inbound_at"],
         "note": _note_from_row(row),
     }
+    if "has_outbound" in row.keys():
+        result["has_outbound"] = bool(row["has_outbound"])
+    return result
 
 
 def _history_text_clause(
@@ -949,7 +952,11 @@ def list_inbound_history(
     )
     sql = f"""
         SELECT ir.id, ir.username, ir.password, ir.email, ir.email_password, ir.url,
-               ir.inbound_at, COALESCE(an.note, '') AS note
+               ir.inbound_at, COALESCE(an.note, '') AS note,
+               EXISTS (
+                   SELECT 1 FROM outbound_records AS ob
+                   WHERE ob.inbound_record_id = ir.id
+               ) AS has_outbound
         FROM inbound_records AS ir
         LEFT JOIN account_notes AS an ON an.username = ir.username
         {where_sql}
@@ -962,6 +969,115 @@ def list_inbound_history(
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [_row_to_inbound_dict(row) for row in rows]
+
+
+def get_inbound_record(record_id: int) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT ir.id, ir.username, ir.password, ir.email, ir.email_password, ir.url,
+                   ir.inbound_at, COALESCE(an.note, '') AS note
+            FROM inbound_records AS ir
+            LEFT JOIN account_notes AS an ON an.username = ir.username
+            WHERE ir.id = ?
+            """,
+            (record_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return _row_to_inbound_dict(row)
+
+
+def outbound_from_inbound_history(record_id: int) -> dict[str, Any]:
+    with _connect() as conn:
+        inbound_row = conn.execute(
+            """
+            SELECT ir.id, ir.username, ir.password, ir.email, ir.email_password, ir.url,
+                   ir.inbound_at
+            FROM inbound_records AS ir
+            WHERE ir.id = ?
+            """,
+            (record_id,),
+        ).fetchone()
+        if inbound_row is None:
+            raise ValueError("入库记录不存在")
+
+        existing = conn.execute(
+            "SELECT 1 FROM outbound_records WHERE inbound_record_id = ?",
+            (record_id,),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError("该入库记录已出库")
+
+        account_row = conn.execute(
+            """
+            SELECT id, username, password, email, email_password, url,
+                   created_at, inbound_record_id
+            FROM accounts
+            WHERE inbound_record_id = ?
+            """,
+            (record_id,),
+        ).fetchone()
+
+        if account_row is not None:
+            conn.execute(
+                """
+                INSERT INTO outbound_records (
+                    username, password, email, email_password, url,
+                    inbound_at, inbound_record_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_row["username"],
+                    account_row["password"],
+                    account_row["email"],
+                    account_row["email_password"],
+                    account_row["url"],
+                    account_row["created_at"],
+                    account_row["inbound_record_id"],
+                ),
+            )
+            conn.execute("DELETE FROM accounts WHERE id = ?", (account_row["id"],))
+        else:
+            conn.execute(
+                """
+                INSERT INTO outbound_records (
+                    username, password, email, email_password, url,
+                    inbound_at, inbound_record_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    inbound_row["username"],
+                    inbound_row["password"],
+                    inbound_row["email"],
+                    inbound_row["email_password"],
+                    inbound_row["url"],
+                    inbound_row["inbound_at"],
+                    record_id,
+                ),
+            )
+
+        outbound_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        outbound_row = conn.execute(
+            """
+            SELECT ob.id, ob.username, ob.password, ob.email, ob.email_password, ob.url,
+                   ob.inbound_at, ob.outbound_at, ob.inbound_record_id,
+                   COALESCE(an.note, '') AS note
+            FROM outbound_records AS ob
+            LEFT JOIN account_notes AS an ON an.username = ob.username
+            WHERE ob.id = ?
+            """,
+            (outbound_id,),
+        ).fetchone()
+
+    return {
+        **_row_to_account_dict(outbound_row),
+        "inbound_at": outbound_row["inbound_at"],
+        "outbound_at": outbound_row["outbound_at"],
+        "inbound_record_id": outbound_row["inbound_record_id"],
+    }
 
 
 def get_outbound_record(record_id: int) -> dict[str, Any] | None:

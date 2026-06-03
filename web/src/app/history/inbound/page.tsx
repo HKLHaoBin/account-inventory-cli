@@ -3,9 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { HistoryFilters } from "@/components/history/HistoryFilters";
 import { HistoryTable } from "@/components/history/HistoryTable";
-import { fetchInboundHistory } from "@/lib/api";
+import {
+  commitOutboundFromInboundHistory,
+  fetchInboundHistory,
+  writeAppClipboardText,
+} from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
-import type { DateRangeFilter, InboundRecord } from "@/types/account";
+import type { DateRangeFilter, HistoryRecord, InboundRecord } from "@/types/account";
 
 export default function InboundHistoryPage() {
   const [query, setQuery] = useState("");
@@ -57,6 +61,15 @@ export default function InboundHistoryPage() {
     []
   );
 
+  const handleOutboundFromInbound = useCallback(
+    async (record: InboundRecord | HistoryRecord) => {
+      const payload = await commitOutboundFromInboundHistory(record);
+      await writeAppClipboardText(payload.clipboardText);
+      setReloadToken((value) => value + 1);
+    },
+    []
+  );
+
   return (
     <div className="space-y-4">
       <HistoryFilters
@@ -76,6 +89,7 @@ export default function InboundHistoryPage() {
         error={error}
         emptyMessage="暂无入库历史记录"
         onRetry={retry}
+        onOutboundFromInbound={handleOutboundFromInbound}
       />
     </div>
   );
