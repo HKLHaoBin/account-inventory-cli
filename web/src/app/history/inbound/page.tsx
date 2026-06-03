@@ -70,6 +70,7 @@ export default function InboundHistoryPage() {
 
       <HistoryTable
         mode="inbound"
+        exportMode="inbound"
         records={records}
         loading={loading}
         error={error}

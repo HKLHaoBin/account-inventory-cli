@@ -70,6 +70,7 @@ export default function OutboundHistoryPage() {
 
       <HistoryTable
         mode="outbound"
+        exportMode="outbound"
         records={records}
         loading={loading}
         error={error}

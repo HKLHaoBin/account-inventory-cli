@@ -26,6 +26,28 @@ export function formatAccountLine(
   );
 }
 
+export function formatHistoryRecordLine(record: {
+  username: string;
+  password: string;
+  email?: string;
+  emailPassword?: string;
+  url?: string;
+}): string {
+  return formatAccountLine(
+    record.username,
+    record.password,
+    record.email,
+    record.emailPassword,
+    record.url
+  );
+}
+
+export function formatHistoryRecordsText(
+  records: Array<Parameters<typeof formatHistoryRecordLine>[0]>
+): string {
+  return records.map(formatHistoryRecordLine).filter(Boolean).join("\n");
+}
+
 export function maskValue(value: string, visible = 2): string {
   if (value.length <= visible * 2) return "••••••";
   return value.slice(0, visible) + "••••" + value.slice(-visible);

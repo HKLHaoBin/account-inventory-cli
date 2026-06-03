@@ -71,6 +71,7 @@ export default function HistoryPage() {
 
       <HistoryTable
         mode="all"
+        exportMode="all"
         records={records}
         loading={loading}
         error={error}

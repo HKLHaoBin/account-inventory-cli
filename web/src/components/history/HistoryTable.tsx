@@ -1,14 +1,19 @@
 "use client";
 
-import { Copy } from "lucide-react";
+import { Copy, Download } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
 import { writeAppClipboardText } from "@/lib/api";
 import {
-  formatAccountLine,
+  defaultHistoryTextFilename,
+  downloadTextFile,
+} from "@/lib/download";
+import {
   formatDateTime,
+  formatHistoryRecordLine,
+  formatHistoryRecordsText,
   groupByDate,
 } from "@/lib/utils";
 import type { HistoryRecord, InboundRecord, OutboundRecord } from "@/types/account";
@@ -17,6 +22,7 @@ type HistoryTableMode = "all" | "inbound" | "outbound";
 
 interface HistoryTableProps {
   mode: HistoryTableMode;
+  exportMode?: HistoryTableMode;
   records: HistoryRecord[] | InboundRecord[] | OutboundRecord[];
   loading?: boolean;
   error?: string;
@@ -24,22 +30,14 @@ interface HistoryTableProps {
   onRetry?: () => void;
 }
 
-function copyLine(record: {
-  username: string;
-  password: string;
-  email?: string;
-  emailPassword?: string;
-  url?: string;
-}) {
-  void writeAppClipboardText(
-    formatAccountLine(
-      record.username,
-      record.password,
-      record.email,
-      record.emailPassword,
-      record.url
-    )
-  );
+type HistoryCopyRecord = Parameters<typeof formatHistoryRecordLine>[0];
+
+async function copyLine(record: HistoryCopyRecord) {
+  try {
+    await writeAppClipboardText(formatHistoryRecordLine(record));
+  } catch (err) {
+    console.error("复制失败", err);
+  }
 }
 
 function isHistoryRecord(
@@ -56,12 +54,31 @@ function isOutboundRecord(
 
 export function HistoryTable({
   mode,
+  exportMode,
   records,
   loading = false,
   error = "",
   emptyMessage = "暂无历史记录",
   onRetry,
 }: HistoryTableProps) {
+  const filenameMode = exportMode ?? mode;
+  const bulkDisabled = loading || records.length === 0;
+
+  async function copyAll() {
+    try {
+      await writeAppClipboardText(formatHistoryRecordsText(records));
+    } catch (err) {
+      console.error("复制失败", err);
+    }
+  }
+
+  function exportAll() {
+    downloadTextFile(
+      formatHistoryRecordsText(records),
+      defaultHistoryTextFilename(filenameMode)
+    );
+  }
+
   const groups =
     mode === "all"
       ? groupByDate(records as HistoryRecord[], "timestamp")
@@ -106,6 +123,26 @@ export function HistoryTable({
 
   return (
     <>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={bulkDisabled}
+          onClick={() => void copyAll()}
+        >
+          <Copy className="h-4 w-4" />
+          复制全部 ({records.length})
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={bulkDisabled}
+          onClick={exportAll}
+        >
+          <Download className="h-4 w-4" />
+          导出 TXT ({records.length})
+        </Button>
+      </div>
       {groups.map((group) => (
         <div key={group.label} className="space-y-3">
           <h2 className="text-sm font-semibold text-muted-foreground">
@@ -123,6 +160,7 @@ export function HistoryTable({
                       <th className="px-4 py-3 text-left font-medium">账号</th>
                       <th className="px-4 py-3 text-left font-medium">密码</th>
                       <th className="px-4 py-3 text-left font-medium">邮箱</th>
+                      <th className="px-4 py-3 text-left font-medium">邮箱密码</th>
                       <th className="px-4 py-3 text-left font-medium">入库时间</th>
                       {(mode === "outbound" || mode === "all") && (
                         <th className="px-4 py-3 text-left font-medium">出库时间</th>
@@ -162,6 +200,13 @@ export function HistoryTable({
                               <span className="text-muted-foreground">—</span>
                             )}
                           </td>
+                          <td className="px-4 py-3">
+                            {record.emailPassword ? (
+                              <PasswordField value={record.emailPassword} />
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
                           <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                             {record.inboundAt ? (
                               formatDateTime(record.inboundAt)
@@ -188,7 +233,7 @@ export function HistoryTable({
                               variant="ghost"
                               size="icon"
                               title="复制"
-                              onClick={() => copyLine(record)}
+                              onClick={() => void copyLine(record)}
                             >
                               <Copy className="h-3.5 w-3.5" />
                             </Button>
@@ -229,6 +274,9 @@ export function HistoryTable({
                           {record.email && (
                             <span className="text-xs">{record.email}</span>
                           )}
+                          {record.emailPassword && (
+                            <PasswordField value={record.emailPassword} />
+                          )}
                           {record.inboundAt && (
                             <p className="text-xs text-muted-foreground">
                               入库 {formatDateTime(record.inboundAt)}
@@ -254,7 +302,7 @@ export function HistoryTable({
                           size="icon"
                           className="shrink-0"
                           title="复制"
-                          onClick={() => copyLine(record)}
+                          onClick={() => void copyLine(record)}
                         >
                           <Copy className="h-4 w-4" />
                         </Button>

@@ -15,6 +15,12 @@ export function defaultOutboundTextFilename(): string {
   return `outbound-${timestampForFilename()}.txt`;
 }
 
+export function defaultHistoryTextFilename(
+  mode: "all" | "inbound" | "outbound"
+): string {
+  return `history-${mode}-${timestampForFilename()}.txt`;
+}
+
 export function downloadTextFile(
   text: string,
   filename = defaultOutboundTextFilename()
