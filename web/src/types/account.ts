@@ -133,24 +133,40 @@ export type SearchResult =
       matchedField: string;
     };
 
-export interface SearchPayload {
+export interface PaginatedMeta {
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface SearchPayload extends PaginatedMeta {
   results: SearchResult[];
+  inventoryTotal: number;
+  historyTotal: number;
 }
 
-export interface OutboundHistoryPayload {
+export interface OutboundHistoryPayload extends PaginatedMeta {
   records: OutboundRecord[];
+  inventoryUsernames?: string[];
 }
 
-export interface InboundHistoryPayload {
+export interface InboundHistoryPayload extends PaginatedMeta {
   records: InboundRecord[];
 }
 
-export interface HistoryPayload {
+export interface HistoryPayload extends PaginatedMeta {
   records: HistoryRecord[];
+  inventoryUsernames?: string[];
 }
 
-export interface InventoryPayload {
+export interface InventoryPayload extends PaginatedMeta {
   records: Account[];
+}
+
+export interface HistoryExportPayload {
+  text: string;
+  count: number;
 }
 
 export interface DashboardPayload {

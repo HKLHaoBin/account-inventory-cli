@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
-import { writeAppClipboardText } from "@/lib/api";
+import { exportHistoryText, writeAppClipboardText } from "@/lib/api";
 import {
   defaultHistoryTextFilename,
   downloadTextFile,
@@ -14,17 +14,24 @@ import {
 import {
   formatDateTime,
   formatHistoryRecordLine,
-  formatHistoryRecordsText,
   groupByDate,
 } from "@/lib/utils";
 import type { HistoryRecord, InboundRecord, OutboundRecord } from "@/types/account";
 
 type HistoryTableMode = "all" | "inbound" | "outbound";
 
+export interface HistoryExportFilters {
+  type?: "all" | "inbound" | "outbound";
+  q?: string;
+  ranges?: string[];
+}
+
 interface HistoryTableProps {
   mode: HistoryTableMode;
   exportMode?: HistoryTableMode;
   records: HistoryRecord[] | InboundRecord[] | OutboundRecord[];
+  total: number;
+  exportFilters: HistoryExportFilters;
   loading?: boolean;
   error?: string;
   emptyMessage?: string;
@@ -181,6 +188,8 @@ export function HistoryTable({
   mode,
   exportMode,
   records,
+  total,
+  exportFilters,
   loading = false,
   error = "",
   emptyMessage = "暂无历史记录",
@@ -191,9 +200,12 @@ export function HistoryTable({
 }: HistoryTableProps) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
 
   const filenameMode = exportMode ?? mode;
-  const bulkDisabled = loading || records.length === 0;
+  const bulkDisabled = loading || exportBusy || total === 0;
+  const exportCount = total;
 
   async function handleReInboundClick(record: OutboundRecord | HistoryRecord) {
     if (!onReInbound || busyId) return;
@@ -237,19 +249,41 @@ export function HistoryTable({
     }
   }
 
+  async function fetchExportText() {
+    const payload = await exportHistoryText({
+      type: exportFilters.type ?? filenameMode,
+      q: exportFilters.q,
+      ranges: exportFilters.ranges,
+    });
+    return payload.text;
+  }
+
   async function copyAll() {
+    setExportError("");
+    setExportBusy(true);
     try {
-      await writeAppClipboardText(formatHistoryRecordsText(records));
+      const text = await fetchExportText();
+      await writeAppClipboardText(text);
     } catch (err) {
+      setExportError(err instanceof Error ? err.message : "复制失败");
       console.error("复制失败", err);
+    } finally {
+      setExportBusy(false);
     }
   }
 
-  function exportAll() {
-    downloadTextFile(
-      formatHistoryRecordsText(records),
-      defaultHistoryTextFilename(filenameMode)
-    );
+  async function exportAll() {
+    setExportError("");
+    setExportBusy(true);
+    try {
+      const text = await fetchExportText();
+      downloadTextFile(text, defaultHistoryTextFilename(filenameMode));
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "导出失败");
+      console.error("导出失败", err);
+    } finally {
+      setExportBusy(false);
+    }
   }
 
   const groups =
@@ -304,17 +338,20 @@ export function HistoryTable({
           onClick={() => void copyAll()}
         >
           <Copy className="h-4 w-4" />
-          复制全部 ({records.length})
+          {exportBusy ? "处理中…" : `复制全部 (${exportCount})`}
         </Button>
         <Button
           variant="secondary"
           size="sm"
           disabled={bulkDisabled}
-          onClick={exportAll}
+          onClick={() => void exportAll()}
         >
           <Download className="h-4 w-4" />
-          导出 TXT ({records.length})
+          {exportBusy ? "处理中…" : `导出 TXT (${exportCount})`}
         </Button>
+        {exportError && (
+          <p className="text-sm text-red-600">{exportError}</p>
+        )}
       </div>
       {groups.map((group) => (
         <div key={group.label} className="space-y-3">

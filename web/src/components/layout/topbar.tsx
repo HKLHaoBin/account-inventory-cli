@@ -72,10 +72,10 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     const timer = window.setTimeout(() => {
       setLoading(true);
       setSearchError("");
-      searchAccounts(q)
+      searchAccounts(q, { page: 1, pageSize: 20, source: "all" })
         .then((payload) => {
           if (ignore) return;
-          setResults(payload);
+          setResults(payload.results);
         })
         .catch((error) => {
           if (ignore) return;
@@ -176,8 +176,12 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
       const copiedOk = text ? await copy(text) : true;
       const q = query.trim();
       if (q) {
-        const updated = await searchAccounts(q);
-        setResults(updated);
+        const updated = await searchAccounts(q, {
+          page: 1,
+          pageSize: 20,
+          source: "all",
+        });
+        setResults(updated.results);
       } else {
         setResults([]);
       }

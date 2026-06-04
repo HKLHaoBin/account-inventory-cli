@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { HistoryFilters } from "@/components/history/HistoryFilters";
 import { HistoryTable } from "@/components/history/HistoryTable";
+import { Pagination } from "@/components/ui/pagination";
 import {
   commitOutboundFromInboundHistory,
   commitReInboundFromHistory,
-  fetchInventory,
+  DEFAULT_PAGE_SIZE,
   fetchUnifiedHistory,
   writeAppClipboardText,
 } from "@/lib/api";
@@ -16,6 +17,10 @@ import type { DateRangeFilter, HistoryRecord, InboundRecord, OutboundRecord } fr
 export default function HistoryPage() {
   const [query, setQuery] = useState("");
   const [ranges, setRanges] = useState<DateRangeFilter[]>([]);
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [records, setRecords] = useState<HistoryRecord[]>([]);
   const [inventoryUsernames, setInventoryUsernames] = useState<Set<string>>(
     new Set()
@@ -29,48 +34,73 @@ export default function HistoryPage() {
     [ranges]
   );
 
+  const exportFilters = useMemo(
+    () => ({
+      type: "all" as const,
+      q: query,
+      ranges: rangeValues,
+    }),
+    [query, rangeValues]
+  );
+
   const retry = useCallback(() => {
-    setLoading(true);
     setReloadToken((value) => value + 1);
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    Promise.all([
-      fetchUnifiedHistory({
-        type: "all",
-        q: query,
-        ranges: rangeValues,
-      }),
-      fetchInventory(),
-    ])
-      .then(([historyPayload, inventoryPayload]) => {
-        if (!active) return;
-        setRecords(historyPayload);
-        setInventoryUsernames(
-          new Set(inventoryPayload.map((item) => item.username))
-        );
-        setError("");
-      })
-      .catch((requestError) => {
-        if (!active) return;
+  const loadHistory = useCallback(
+    async (ignoreResult?: () => boolean) => {
+      setLoading(true);
+      setError("");
+      try {
+        const payload = await fetchUnifiedHistory({
+          type: "all",
+          q: query,
+          ranges: rangeValues,
+          page,
+          pageSize,
+        });
+        if (ignoreResult?.()) return;
+        if (payload.records.length === 0 && page > 1) {
+          setPage((current) => Math.max(1, current - 1));
+          return;
+        }
+        setRecords(payload.records);
+        setTotal(payload.total);
+        setTotalPages(payload.totalPages);
+        setInventoryUsernames(new Set(payload.inventoryUsernames ?? []));
+      } catch (requestError) {
+        if (ignoreResult?.()) return;
         setError(
           requestError instanceof Error ? requestError.message : "历史流水读取失败"
         );
         setRecords([]);
+        setTotal(0);
+        setTotalPages(1);
         setInventoryUsernames(new Set());
-      })
-      .finally(() => {
-        if (!active) return;
-        setLoading(false);
-      });
+      } finally {
+        if (!ignoreResult?.()) setLoading(false);
+      }
+    },
+    [page, pageSize, query, rangeValues]
+  );
+
+  useEffect(() => {
+    let ignore = false;
+    const timer = window.setTimeout(() => {
+      void loadHistory(() => ignore);
+    }, 0);
     return () => {
-      active = false;
+      ignore = true;
+      window.clearTimeout(timer);
     };
-  }, [query, rangeValues, reloadToken]);
+  }, [loadHistory, reloadToken]);
 
   useEffect(
-    () => subscribeDatabaseChanged(() => setReloadToken((value) => value + 1)),
+    () =>
+      subscribeDatabaseChanged(() => {
+        setPage(1);
+        setReloadToken((value) => value + 1);
+      }),
     []
   );
 
@@ -97,16 +127,24 @@ export default function HistoryPage() {
       <HistoryFilters
         query={query}
         ranges={ranges}
-        onQueryChange={setQuery}
-        onRangesChange={setRanges}
+        onQueryChange={(value) => {
+          setPage(1);
+          setQuery(value);
+        }}
+        onRangesChange={(value) => {
+          setPage(1);
+          setRanges(value);
+        }}
       />
 
-      <p className="text-sm text-muted-foreground">共 {records.length} 条记录</p>
+      <p className="text-sm text-muted-foreground">共 {total} 条记录</p>
 
       <HistoryTable
         mode="all"
         exportMode="all"
         records={records}
+        total={total}
+        exportFilters={exportFilters}
         loading={loading}
         error={error}
         emptyMessage="暂无历史流水记录"
@@ -114,6 +152,15 @@ export default function HistoryPage() {
         inventoryUsernames={inventoryUsernames}
         onReInbound={handleReInbound}
         onOutboundFromInbound={handleOutboundFromInbound}
+      />
+
+      <Pagination
+        total={total}
+        page={page}
+        pageSize={pageSize}
+        totalPages={totalPages}
+        onPageChange={setPage}
+        disabled={loading}
       />
     </div>
   );

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -34,6 +35,31 @@ app.add_middleware(
 
 db.init_db()
 _ignored_clipboard_text: str | None = None
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+
+def _normalize_pagination(
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> tuple[int, int, int]:
+    page = max(1, page)
+    page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    offset = (page - 1) * page_size
+    return page, page_size, offset
+
+
+def _total_pages(total: int, page_size: int) -> int:
+    if total <= 0:
+        return 0
+    return math.ceil(total / page_size)
+
+
+def _page_inventory_usernames(usernames: list[str]) -> list[str]:
+    if not usernames:
+        return []
+    return sorted(db.exists_in_inventory_many(usernames))
 
 
 class AccountPayload(BaseModel):
@@ -89,10 +115,24 @@ class HistoryRecordPayload(BaseModel):
 
 class InboundHistoryPayload(BaseModel):
     records: list[InboundRecordPayload]
+    total: int = 0
+    page: int = 1
+    pageSize: int = DEFAULT_PAGE_SIZE
+    totalPages: int = 0
 
 
 class HistoryPayload(BaseModel):
     records: list[HistoryRecordPayload]
+    total: int = 0
+    page: int = 1
+    pageSize: int = DEFAULT_PAGE_SIZE
+    totalPages: int = 0
+    inventoryUsernames: list[str] = Field(default_factory=list)
+
+
+class HistoryExportPayload(BaseModel):
+    text: str
+    count: int
 
 
 class SearchResultPayload(BaseModel):
@@ -104,10 +144,21 @@ class SearchResultPayload(BaseModel):
 
 class SearchPayload(BaseModel):
     results: list[SearchResultPayload]
+    total: int = 0
+    page: int = 1
+    pageSize: int = DEFAULT_PAGE_SIZE
+    totalPages: int = 0
+    inventoryTotal: int = 0
+    historyTotal: int = 0
 
 
 class OutboundHistoryPayload(BaseModel):
     records: list[OutboundRecordPayload]
+    total: int = 0
+    page: int = 1
+    pageSize: int = DEFAULT_PAGE_SIZE
+    totalPages: int = 0
+    inventoryUsernames: list[str] = Field(default_factory=list)
 
 
 class ReinboundFromHistoryPayload(BaseModel):
@@ -122,6 +173,10 @@ class OutboundFromInboundHistoryPayload(BaseModel):
 
 class InventoryPayload(BaseModel):
     records: list[AccountPayload]
+    total: int = 0
+    page: int = 1
+    pageSize: int = DEFAULT_PAGE_SIZE
+    totalPages: int = 0
 
 
 class ActivityPayload(BaseModel):
@@ -664,52 +719,158 @@ def delete_separator_rule(rule_id: str) -> dict[str, bool]:
 
 
 @app.get("/api/inventory", response_model=InventoryPayload)
-def get_inventory() -> InventoryPayload:
+def get_inventory(
+    page: int = 1,
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, alias="pageSize"),
+    q: str = "",
+    sort_by: str = Query(default="inboundAt", alias="sortBy"),
+    sort_dir: str = Query(default="asc", alias="sortDir"),
+) -> InventoryPayload:
+    page, page_size, offset = _normalize_pagination(page, page_size)
+    query = q.strip()
+    total = db.count_inventory(query=query)
+    rows = db.list_inventory(
+        query=query,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        offset=offset,
+        limit=page_size,
+    )
     return InventoryPayload(
-        records=[_account_payload(row) for row in db.list_inventory()]
+        records=[_account_payload(row) for row in rows],
+        total=total,
+        page=page,
+        pageSize=page_size,
+        totalPages=_total_pages(total, page_size),
+    )
+
+
+def _search_result_inventory(row: dict, query: str) -> SearchResultPayload:
+    return SearchResultPayload(
+        id=f"inv-{row['id']}",
+        source="inventory",
+        account=_account_payload(row),
+        matchedField=_matched_field(row, query),
+    )
+
+
+def _search_result_history(row: dict, query: str) -> SearchResultPayload:
+    return SearchResultPayload(
+        id=f"hist-{row['id']}",
+        source="history",
+        account=_outbound_record_payload(row),
+        matchedField=_matched_field(row, query),
     )
 
 
 @app.get("/api/search", response_model=SearchPayload)
-def search_accounts(q: str = "") -> SearchPayload:
+def search_accounts(
+    q: str = "",
+    page: int = 1,
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, alias="pageSize"),
+    source: Literal["all", "inventory", "history"] = "all",
+) -> SearchPayload:
     query = q.strip()
+    page, page_size, offset = _normalize_pagination(page, page_size)
+
     if not query:
-        return SearchPayload(results=[])
+        return SearchPayload(
+            results=[],
+            total=0,
+            page=page,
+            pageSize=page_size,
+            totalPages=0,
+            inventoryTotal=0,
+            historyTotal=0,
+        )
 
+    inventory_total = db.count_search_inventory(query)
+    history_total = db.count_search_outbound_history(query)
+
+    if source == "inventory":
+        total = inventory_total
+        rows = db.search_inventory(query, offset=offset, limit=page_size)
+        results = [_search_result_inventory(row, query) for row in rows]
+        return SearchPayload(
+            results=results,
+            total=total,
+            page=page,
+            pageSize=page_size,
+            totalPages=_total_pages(total, page_size),
+            inventoryTotal=inventory_total,
+            historyTotal=history_total,
+        )
+
+    if source == "history":
+        total = history_total
+        rows = db.search_outbound_history(query, offset=offset, limit=page_size)
+        results = [_search_result_history(row, query) for row in rows]
+        return SearchPayload(
+            results=results,
+            total=total,
+            page=page,
+            pageSize=page_size,
+            totalPages=_total_pages(total, page_size),
+            inventoryTotal=inventory_total,
+            historyTotal=history_total,
+        )
+
+    total = inventory_total + history_total
     results: list[SearchResultPayload] = []
-    for row in db.search_inventory(query):
-        results.append(
-            SearchResultPayload(
-                id=f"inv-{row['id']}",
-                source="inventory",
-                account=_account_payload(row),
-                matchedField=_matched_field(row, query),
-            )
-        )
+    if offset < inventory_total:
+        inventory_limit = min(page_size, inventory_total - offset)
+        for row in db.search_inventory(
+            query,
+            offset=offset,
+            limit=inventory_limit,
+        ):
+            results.append(_search_result_inventory(row, query))
 
-    for row in db.search_outbound_history(query):
-        results.append(
-            SearchResultPayload(
-                id=f"hist-{row['id']}",
-                source="history",
-                account=_outbound_record_payload(row),
-                matchedField=_matched_field(row, query),
-            )
-        )
+    remaining = page_size - len(results)
+    if remaining > 0:
+        history_offset = max(0, offset - inventory_total)
+        for row in db.search_outbound_history(
+            query,
+            offset=history_offset,
+            limit=remaining,
+        ):
+            results.append(_search_result_history(row, query))
 
-    return SearchPayload(results=results)
+    return SearchPayload(
+        results=results,
+        total=total,
+        page=page,
+        pageSize=page_size,
+        totalPages=_total_pages(total, page_size),
+        inventoryTotal=inventory_total,
+        historyTotal=history_total,
+    )
 
 
 @app.get("/api/outbound/history", response_model=OutboundHistoryPayload)
 def get_outbound_history(
     q: str = "",
     ranges: list[str] = Query(default=[]),
+    page: int = 1,
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, alias="pageSize"),
 ) -> OutboundHistoryPayload:
+    page, page_size, offset = _normalize_pagination(page, page_size)
+    query = q.strip()
+    total = db.count_outbound_history(query=query, range_tokens=ranges)
+    rows = db.list_outbound_history(
+        query=query,
+        range_tokens=ranges,
+        offset=offset,
+        limit=page_size,
+    )
+    page_usernames = [row["username"] for row in rows]
     return OutboundHistoryPayload(
-        records=[
-            _outbound_record_payload(row)
-            for row in db.list_outbound_history(query=q.strip(), range_tokens=ranges)
-        ]
+        records=[_outbound_record_payload(row) for row in rows],
+        total=total,
+        page=page,
+        pageSize=page_size,
+        totalPages=_total_pages(total, page_size),
+        inventoryUsernames=_page_inventory_usernames(page_usernames),
     )
 
 
@@ -780,12 +941,24 @@ def outbound_from_inbound_history(record_id: int) -> OutboundFromInboundHistoryP
 def get_inbound_history(
     q: str = "",
     ranges: list[str] = Query(default=[]),
+    page: int = 1,
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, alias="pageSize"),
 ) -> InboundHistoryPayload:
+    page, page_size, offset = _normalize_pagination(page, page_size)
+    query = q.strip()
+    total = db.count_inbound_history(query=query, range_tokens=ranges)
+    rows = db.list_inbound_history(
+        query=query,
+        range_tokens=ranges,
+        offset=offset,
+        limit=page_size,
+    )
     return InboundHistoryPayload(
-        records=[
-            _inbound_record_payload(row)
-            for row in db.list_inbound_history(query=q.strip(), range_tokens=ranges)
-        ]
+        records=[_inbound_record_payload(row) for row in rows],
+        total=total,
+        page=page,
+        pageSize=page_size,
+        totalPages=_total_pages(total, page_size),
     )
 
 
@@ -794,17 +967,51 @@ def get_history(
     type: Literal["all", "inbound", "outbound"] = "all",
     q: str = "",
     ranges: list[str] = Query(default=[]),
+    page: int = 1,
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, alias="pageSize"),
 ) -> HistoryPayload:
-    return HistoryPayload(
-        records=[
-            _history_record_payload(row)
-            for row in db.list_unified_history(
-                history_type=type,
-                query=q.strip(),
-                range_tokens=ranges,
-            )
-        ]
+    page, page_size, offset = _normalize_pagination(page, page_size)
+    query = q.strip()
+    if type == "inbound":
+        total = db.count_inbound_history(query=query, range_tokens=ranges)
+    elif type == "outbound":
+        total = db.count_outbound_history(query=query, range_tokens=ranges)
+    else:
+        total = db.count_unified_history(query=query, range_tokens=ranges)
+    rows = db.list_unified_history(
+        history_type=type,
+        query=query,
+        range_tokens=ranges,
+        offset=offset,
+        limit=page_size,
     )
+    outbound_usernames = [
+        row["username"] for row in rows if row["type"] == "outbound"
+    ]
+    return HistoryPayload(
+        records=[_history_record_payload(row) for row in rows],
+        total=total,
+        page=page,
+        pageSize=page_size,
+        totalPages=_total_pages(total, page_size),
+        inventoryUsernames=_page_inventory_usernames(outbound_usernames),
+    )
+
+
+@app.get("/api/history/export", response_model=HistoryExportPayload)
+def export_history(
+    type: Literal["all", "inbound", "outbound"] = "all",
+    q: str = "",
+    ranges: list[str] = Query(default=[]),
+) -> HistoryExportPayload:
+    rows = db.export_history_records(
+        history_type=type,
+        query=q.strip(),
+        range_tokens=ranges,
+    )
+    lines = [_format_account_row(row) for row in rows]
+    text = "\n".join(line for line in lines if line)
+    return HistoryExportPayload(text=text, count=len(rows))
 
 
 @app.get("/api/runtime/update-status")

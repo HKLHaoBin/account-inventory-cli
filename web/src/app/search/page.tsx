@@ -1,16 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, Suspense, useState } from "react";
+import { useCallback, useEffect, useRef, Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Copy, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
+import { Pagination } from "@/components/ui/pagination";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
+  DEFAULT_PAGE_SIZE,
   outboundByUsername,
   searchAccounts,
   writeAppClipboardText,
@@ -37,7 +39,13 @@ function SearchContent() {
   const searchParams = useSearchParams();
   const query = searchParams.get("q") || "";
   const [tab, setTab] = useState<"all" | "inventory" | "history">("all");
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [inventoryTotal, setInventoryTotal] = useState(0);
+  const [historyTotal, setHistoryTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [outboundUsername, setOutboundUsername] = useState("");
@@ -52,24 +60,35 @@ function SearchContent() {
     copied,
   } = useLastOutboundClipboard();
   const [copyError, setCopyError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
+  const lastQueryRef = useRef(query);
 
+  const allTotal = inventoryTotal + historyTotal;
   const inventoryResults = results.filter((r) => r.source === "inventory");
   const historyResults = results.filter((r) => r.source === "history");
   const uniqueInventoryHit =
-    inventoryResults.length === 1 && historyResults.length === 0;
-
-  const filtered =
-    tab === "all"
-      ? results
-      : tab === "inventory"
-        ? inventoryResults
-        : historyResults;
+    tab === "all" &&
+    inventoryTotal === 1 &&
+    historyTotal === 0 &&
+    inventoryResults.length === 1 &&
+    historyResults.length === 0;
 
   const loadResults = useCallback(
     async (ignoreResult?: () => boolean) => {
       const q = query.trim();
+      if (lastQueryRef.current !== query) {
+        lastQueryRef.current = query;
+        if (page !== 1) {
+          setPage(1);
+          return;
+        }
+      }
       if (!q) {
         setResults([]);
+        setTotal(0);
+        setTotalPages(1);
+        setInventoryTotal(0);
+        setHistoryTotal(0);
         setError("");
         setLoading(false);
         return;
@@ -78,12 +97,28 @@ function SearchContent() {
       setLoading(true);
       setError("");
       try {
-        const payload = await searchAccounts(q);
+        const payload = await searchAccounts(q, {
+          page,
+          pageSize,
+          source: tab,
+        });
         if (ignoreResult?.()) return;
-        setResults(payload);
+        if (payload.results.length === 0 && page > 1) {
+          setPage((current) => Math.max(1, current - 1));
+          return;
+        }
+        setResults(payload.results);
+        setTotal(payload.total);
+        setTotalPages(payload.totalPages);
+        setInventoryTotal(payload.inventoryTotal);
+        setHistoryTotal(payload.historyTotal);
       } catch (requestError) {
         if (ignoreResult?.()) return;
         setResults([]);
+        setTotal(0);
+        setTotalPages(1);
+        setInventoryTotal(0);
+        setHistoryTotal(0);
         setError(
           requestError instanceof Error ? requestError.message : "搜索失败"
         );
@@ -91,7 +126,7 @@ function SearchContent() {
         if (!ignoreResult?.()) setLoading(false);
       }
     },
-    [query]
+    [query, page, pageSize, tab]
   );
 
   useEffect(() => {
@@ -103,11 +138,15 @@ function SearchContent() {
       ignore = true;
       window.clearTimeout(timer);
     };
-  }, [loadResults]);
+  }, [loadResults, reloadToken]);
 
   useEffect(
-    () => subscribeDatabaseChanged(() => void loadResults()),
-    [loadResults]
+    () =>
+      subscribeDatabaseChanged(() => {
+        setPage(1);
+        setReloadToken((value) => value + 1);
+      }),
+    []
   );
 
   const copyResult = (r: SearchResult) => {
@@ -184,7 +223,7 @@ function SearchContent() {
         <p className="mt-1 text-sm text-muted-foreground">
           {query ? (
             <>
-              关键词「{query}」- 共 {results.length} 条结果
+              关键词「{query}」- 共 {allTotal} 条结果
             </>
           ) : (
             "请在顶部搜索框输入关键词"
@@ -197,15 +236,18 @@ function SearchContent() {
           <div className="flex gap-2">
             {(
               [
-                ["all", `全部 (${results.length})`],
-                ["inventory", `库存 (${inventoryResults.length})`],
-                ["history", `历史 (${historyResults.length})`],
+                ["all", `全部 (${allTotal})`],
+                ["inventory", `库存 (${inventoryTotal})`],
+                ["history", `历史 (${historyTotal})`],
               ] as const
             ).map(([key, label]) => (
               <button
                 key={key}
                 type="button"
-                onClick={() => setTab(key)}
+                onClick={() => {
+                  setTab(key);
+                  setPage(1);
+                }}
                 className={`rounded-[10px] px-4 py-2 text-sm font-medium transition-all ${
                   tab === key
                     ? "bg-primary text-primary-foreground shadow-sm"
@@ -253,7 +295,7 @@ function SearchContent() {
                 搜索中…
               </CardContent>
             </Card>
-          ) : filtered.length === 0 ? (
+          ) : results.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center text-muted-foreground">
                 未找到匹配结果
@@ -261,7 +303,7 @@ function SearchContent() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {filtered.map((r) => (
+              {results.map((r) => (
                 <Card key={r.id}>
                   <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
                     <div className="space-y-1">
@@ -345,7 +387,7 @@ function SearchContent() {
                 </Card>
               ))}
 
-              {uniqueInventoryHit && tab !== "history" && (
+              {uniqueInventoryHit && (
                 <Card className="border-primary/30 bg-primary/5">
                   <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
                     <div>
@@ -389,6 +431,15 @@ function SearchContent() {
               )}
             </div>
           )}
+
+          <Pagination
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            disabled={loading}
+          />
         </>
       )}
     </div>

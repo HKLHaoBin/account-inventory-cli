@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import gc
 import json
 import shutil
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -565,6 +567,22 @@ def rename_database(database_id: str, name: str) -> dict[str, Any]:
     return database_info({**record, "active": record["id"] == active_id})
 
 
+def _unlink_database_file(path: Path, *, attempts: int = 10, delay: float = 0.05) -> None:
+    last_exc: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except OSError as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                break
+            gc.collect()
+            time.sleep(delay * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
+
+
 def delete_database(database_id: str) -> dict[str, Any]:
     records, active_id = _ensure_registry()
     record = next((item for item in records if item["id"] == database_id), None)
@@ -574,7 +592,7 @@ def delete_database(database_id: str) -> dict[str, Any]:
     remaining = [item for item in records if item["id"] != database_id]
     target_path = _database_path(record)
     try:
-        target_path.unlink(missing_ok=True)
+        _unlink_database_file(target_path)
     except OSError as exc:
         raise ValueError(f"删除数据库文件失败：{exc}") from exc
 
@@ -593,9 +611,40 @@ def delete_database(database_id: str) -> dict[str, Any]:
     return database_info({**active, "active": True})
 
 
-def count_inventory() -> int:
+def _build_inventory_where(query: str) -> tuple[str, list[Any]]:
+    text = query.strip()
+    if not text:
+        return "", []
+    pattern = f"%{_escape_like(text)}%"
+    return (
+        """
+        WHERE a.username LIKE ? ESCAPE '\\'
+           OR a.email LIKE ? ESCAPE '\\'
+           OR an.note LIKE ? ESCAPE '\\'
+        """,
+        [pattern, pattern, pattern],
+    )
+
+
+def _inventory_order_clause(sort_by: str, sort_dir: str) -> str:
+    direction = "DESC" if sort_dir.strip().lower() == "desc" else "ASC"
+    if sort_by.strip() == "username":
+        return f"a.username {direction}, a.id {direction}"
+    return f"a.created_at {direction}, a.id {direction}"
+
+
+def count_inventory(*, query: str = "") -> int:
+    where_sql, params = _build_inventory_where(query)
     with _connect() as conn:
-        row = conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM accounts AS a
+            LEFT JOIN account_notes AS an ON an.username = a.username
+            {where_sql}
+            """,
+            params,
+        ).fetchone()
         return int(row["n"])
 
 
@@ -749,48 +798,90 @@ def _row_to_account_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _search_where_clause() -> str:
+    return """
+        WHERE t.username LIKE ? ESCAPE '\\'
+           OR t.password LIKE ? ESCAPE '\\'
+           OR t.email LIKE ? ESCAPE '\\'
+           OR t.email_password LIKE ? ESCAPE '\\'
+           OR t.url LIKE ? ESCAPE '\\'
+           OR an.note LIKE ? ESCAPE '\\'
+    """
+
+
+def _search_pattern_params(substring: str) -> list[str]:
+    pattern = f"%{_escape_like(substring)}%"
+    return [pattern, pattern, pattern, pattern, pattern, pattern]
+
+
 def _search_table(
     table: str,
     substring: str,
     *,
     columns: str,
     order_by: str,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     if not substring:
         return []
 
-    pattern = f"%{_escape_like(substring)}%"
+    params = _search_pattern_params(substring)
+    sql = f"""
+        SELECT {columns}
+        FROM {table} AS t
+        LEFT JOIN account_notes AS an ON an.username = t.username
+        {_search_where_clause()}
+        ORDER BY {order_by}
+    """
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = [*params, limit, offset]
+
     with _connect() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT {columns}
-            FROM {table} AS t
-            LEFT JOIN account_notes AS an ON an.username = t.username
-            WHERE t.username LIKE ? ESCAPE '\\'
-               OR t.password LIKE ? ESCAPE '\\'
-               OR t.email LIKE ? ESCAPE '\\'
-               OR t.email_password LIKE ? ESCAPE '\\'
-               OR t.url LIKE ? ESCAPE '\\'
-               OR an.note LIKE ? ESCAPE '\\'
-            ORDER BY {order_by}
-            """,
-            (pattern, pattern, pattern, pattern, pattern, pattern),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
 
 
-def list_inventory(limit: int | None = None) -> list[dict[str, Any]]:
-    sql = """
+def _count_search_table(table: str, substring: str) -> int:
+    if not substring:
+        return 0
+
+    params = _search_pattern_params(substring)
+    with _connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM {table} AS t
+            LEFT JOIN account_notes AS an ON an.username = t.username
+            {_search_where_clause()}
+            """,
+            params,
+        ).fetchone()
+    return int(row["n"])
+
+
+def list_inventory(
+    *,
+    query: str = "",
+    sort_by: str = "inboundAt",
+    sort_dir: str = "asc",
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    where_sql, params = _build_inventory_where(query)
+    order_clause = _inventory_order_clause(sort_by, sort_dir)
+    sql = f"""
         SELECT a.id, a.username, a.password, a.email, a.email_password, a.url,
                a.created_at, COALESCE(an.note, '') AS note
         FROM accounts AS a
         LEFT JOIN account_notes AS an ON an.username = a.username
-        ORDER BY a.created_at ASC, a.id ASC
+        {where_sql}
+        ORDER BY {order_clause}
     """
-    params: tuple[Any, ...] = ()
     if limit is not None:
-        sql += " LIMIT ?"
-        params = (limit,)
+        sql += " LIMIT ? OFFSET ?"
+        params = [*params, limit, offset]
 
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
@@ -938,10 +1029,35 @@ def _build_history_where(
     return f"WHERE {' AND '.join(clauses)}", params
 
 
+def count_inbound_history(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+) -> int:
+    where_sql, params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ir.inbound_at",
+        table_alias="ir",
+    )
+    with _connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM inbound_records AS ir
+            LEFT JOIN account_notes AS an ON an.username = ir.username
+            {where_sql}
+            """,
+            params,
+        ).fetchone()
+    return int(row["n"])
+
+
 def list_inbound_history(
     *,
     query: str = "",
     range_tokens: list[str] | None = None,
+    offset: int = 0,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     where_sql, params = _build_history_where(
@@ -963,8 +1079,8 @@ def list_inbound_history(
         ORDER BY ir.inbound_at DESC, ir.id DESC
     """
     if limit is not None:
-        sql += " LIMIT ?"
-        params = [*params, limit]
+        sql += " LIMIT ? OFFSET ?"
+        params = [*params, limit, offset]
 
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
@@ -1103,10 +1219,35 @@ def get_outbound_record(record_id: int) -> dict[str, Any] | None:
     }
 
 
+def count_outbound_history(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+) -> int:
+    where_sql, params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ob.outbound_at",
+        table_alias="ob",
+    )
+    with _connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM outbound_records AS ob
+            LEFT JOIN account_notes AS an ON an.username = ob.username
+            {where_sql}
+            """,
+            params,
+        ).fetchone()
+    return int(row["n"])
+
+
 def list_outbound_history(
     *,
     query: str = "",
     range_tokens: list[str] | None = None,
+    offset: int = 0,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     where_sql, params = _build_history_where(
@@ -1125,8 +1266,8 @@ def list_outbound_history(
         ORDER BY ob.outbound_at DESC, ob.id DESC
     """
     if limit is not None:
-        sql += " LIMIT ?"
-        params = [*params, limit]
+        sql += " LIMIT ? OFFSET ?"
+        params = [*params, limit, offset]
 
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
@@ -1142,11 +1283,94 @@ def list_outbound_history(
     ]
 
 
+def _unified_history_union_sql(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+) -> tuple[str, list[Any]]:
+    inbound_where, inbound_params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ir.inbound_at",
+        table_alias="ir",
+    )
+    outbound_where, outbound_params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ob.outbound_at",
+        table_alias="ob",
+    )
+    sql = f"""
+        SELECT 'inbound' AS type, ir.id, ir.username, ir.password, ir.email,
+               ir.email_password, ir.url, ir.inbound_at, NULL AS outbound_at,
+               ir.inbound_at AS timestamp,
+               EXISTS (
+                   SELECT 1 FROM outbound_records AS ob2
+                   WHERE ob2.inbound_record_id = ir.id
+               ) AS has_outbound,
+               COALESCE(an.note, '') AS note,
+               NULL AS inbound_record_id
+        FROM inbound_records AS ir
+        LEFT JOIN account_notes AS an ON an.username = ir.username
+        {inbound_where}
+        UNION ALL
+        SELECT 'outbound' AS type, ob.id, ob.username, ob.password, ob.email,
+               ob.email_password, ob.url, ob.inbound_at, ob.outbound_at,
+               ob.outbound_at AS timestamp,
+               0 AS has_outbound,
+               COALESCE(an.note, '') AS note,
+               ob.inbound_record_id
+        FROM outbound_records AS ob
+        LEFT JOIN account_notes AS an ON an.username = ob.username
+        {outbound_where}
+    """
+    return sql, [*inbound_params, *outbound_params]
+
+
+def _row_to_unified_dict(row: sqlite3.Row) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "id": row["id"],
+        "type": row["type"],
+        "username": row["username"],
+        "password": row["password"],
+        "email": row["email"],
+        "email_password": row["email_password"],
+        "url": row["url"],
+        "inbound_at": row["inbound_at"],
+        "outbound_at": row["outbound_at"],
+        "timestamp": row["timestamp"],
+        "note": _note_from_row(row),
+    }
+    if row["type"] == "inbound":
+        result["has_outbound"] = bool(row["has_outbound"])
+    if row["type"] == "outbound":
+        result["inbound_record_id"] = row["inbound_record_id"]
+    return result
+
+
+def count_unified_history(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+) -> int:
+    union_sql, params = _unified_history_union_sql(
+        query=query,
+        range_tokens=range_tokens,
+    )
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM ({union_sql})",
+            params,
+        ).fetchone()
+    return int(row["n"])
+
+
 def list_unified_history(
     *,
     history_type: str = "all",
     query: str = "",
     range_tokens: list[str] | None = None,
+    offset: int = 0,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     normalized = history_type.strip().lower()
@@ -1156,6 +1380,7 @@ def list_unified_history(
             for row in list_inbound_history(
                 query=query,
                 range_tokens=range_tokens,
+                offset=offset,
                 limit=limit,
             )
         ]
@@ -1169,33 +1394,40 @@ def list_unified_history(
             for row in list_outbound_history(
                 query=query,
                 range_tokens=range_tokens,
+                offset=offset,
                 limit=limit,
             )
         ]
 
-    inbound_rows = list_inbound_history(query=query, range_tokens=range_tokens)
-    outbound_rows = list_outbound_history(query=query, range_tokens=range_tokens)
-    merged: list[dict[str, Any]] = []
-    for row in inbound_rows:
-        merged.append(
-            {
-                **row,
-                "type": "inbound",
-                "timestamp": row["inbound_at"],
-            }
-        )
-    for row in outbound_rows:
-        merged.append(
-            {
-                **row,
-                "type": "outbound",
-                "timestamp": row["outbound_at"],
-            }
-        )
-    merged.sort(key=lambda item: (item["timestamp"], item["id"]), reverse=True)
+    union_sql, params = _unified_history_union_sql(
+        query=query,
+        range_tokens=range_tokens,
+    )
+    sql = f"""
+        SELECT *
+        FROM ({union_sql})
+        ORDER BY timestamp DESC, id DESC
+    """
     if limit is not None:
-        return merged[:limit]
-    return merged
+        sql += " LIMIT ? OFFSET ?"
+        params = [*params, limit, offset]
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_row_to_unified_dict(row) for row in rows]
+
+
+def export_history_records(
+    *,
+    history_type: str = "all",
+    query: str = "",
+    range_tokens: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    return list_unified_history(
+        history_type=history_type,
+        query=query,
+        range_tokens=range_tokens,
+    )
 
 def fifo_preview_many(count: int) -> list[dict[str, Any]]:
     if count <= 0:
@@ -1203,7 +1435,16 @@ def fifo_preview_many(count: int) -> list[dict[str, Any]]:
     return list_inventory(limit=count)
 
 
-def search_inventory(substring: str) -> list[dict[str, Any]]:
+def count_search_inventory(substring: str) -> int:
+    return _count_search_table("accounts", substring)
+
+
+def search_inventory(
+    substring: str,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     rows = _search_table(
         "accounts",
         substring,
@@ -1212,6 +1453,8 @@ def search_inventory(substring: str) -> list[dict[str, Any]]:
             "t.created_at, COALESCE(an.note, '') AS note"
         ),
         order_by="t.created_at ASC, t.id ASC",
+        offset=offset,
+        limit=limit,
     )
     return [
         {
@@ -1222,7 +1465,16 @@ def search_inventory(substring: str) -> list[dict[str, Any]]:
     ]
 
 
-def search_outbound_history(substring: str) -> list[dict[str, Any]]:
+def count_search_outbound_history(substring: str) -> int:
+    return _count_search_table("outbound_records", substring)
+
+
+def search_outbound_history(
+    substring: str,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     rows = _search_table(
         "outbound_records",
         substring,
@@ -1232,12 +1484,15 @@ def search_outbound_history(substring: str) -> list[dict[str, Any]]:
             "COALESCE(an.note, '') AS note"
         ),
         order_by="t.outbound_at DESC, t.id DESC",
+        offset=offset,
+        limit=limit,
     )
     return [
         {
             **row,
             "inbound_at": row["inbound_at"],
             "outbound_at": row["outbound_at"],
+            "inbound_record_id": row.get("inbound_record_id"),
         }
         for row in rows
     ]

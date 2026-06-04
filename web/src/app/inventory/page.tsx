@@ -15,9 +15,11 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
+import { Pagination } from "@/components/ui/pagination";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
+  DEFAULT_PAGE_SIZE,
   fetchInventory,
   outboundByUsername,
   writeAppClipboardText,
@@ -37,6 +39,10 @@ export default function InventoryPage() {
   const [filter, setFilter] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("inboundAt");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [density, setDensity] = useState<"comfortable" | "compact">(
     "comfortable"
@@ -58,46 +64,62 @@ export default function InventoryPage() {
     copied,
   } = useLastOutboundClipboard();
 
-  const loadInventory = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const payload = await fetchInventory();
-      setRecords(payload);
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error ? requestError.message : "库存读取失败"
-      );
-      setRecords([]);
-      setSelected(new Set());
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const showFifoBadge =
+    page === 1 &&
+    sortKey === "inboundAt" &&
+    sortDir === "asc" &&
+    !filter.trim();
 
-  useEffect(() => {
-    let active = true;
-    fetchInventory()
-      .then((payload) => {
-        if (!active) return;
-        setRecords(payload);
-      })
-      .catch((requestError) => {
-        if (!active) return;
+  const loadInventory = useCallback(
+    async (ignoreResult?: () => boolean) => {
+      setLoading(true);
+      setError("");
+      try {
+        const payload = await fetchInventory({
+          page,
+          pageSize,
+          q: filter.trim() || undefined,
+          sortBy: sortKey,
+          sortDir,
+        });
+        if (ignoreResult?.()) return;
+        if (payload.records.length === 0 && page > 1) {
+          setPage((current) => Math.max(1, current - 1));
+          return;
+        }
+        setRecords(payload.records);
+        setTotal(payload.total);
+        setTotalPages(payload.totalPages);
+      } catch (requestError) {
+        if (ignoreResult?.()) return;
         setError(
           requestError instanceof Error ? requestError.message : "库存读取失败"
         );
         setRecords([]);
+        setTotal(0);
+        setTotalPages(1);
         setSelected(new Set());
-      })
-      .finally(() => {
-        if (!active) return;
-        setLoading(false);
-      });
+      } finally {
+        if (!ignoreResult?.()) setLoading(false);
+      }
+    },
+    [filter, page, pageSize, sortDir, sortKey]
+  );
+
+  useEffect(() => {
+    let ignore = false;
+    const timer = window.setTimeout(() => {
+      void loadInventory(() => ignore);
+    }, 0);
     return () => {
-      active = false;
+      ignore = true;
+      window.clearTimeout(timer);
     };
-  }, []);
+  }, [loadInventory]);
+
+  useEffect(() => {
+    setSelected(new Set());
+  }, [page, filter, sortKey, sortDir]);
 
   useEffect(
     () =>
@@ -107,37 +129,19 @@ export default function InventoryPage() {
         setOutboundRowErrors({});
         setOutboundUsername(null);
         setSelected(new Set());
+        setPage(1);
         void loadInventory();
       }),
     [loadInventory, clear]
   );
 
-  const sorted = useMemo(() => {
-    let items = [...records];
-    const q = filter.trim().toLowerCase();
-    if (q) {
-      items = items.filter(
-        (a) =>
-          a.username.toLowerCase().includes(q) ||
-          a.email?.toLowerCase().includes(q) ||
-          a.note?.toLowerCase().includes(q)
-      );
-    }
-    items.sort((a, b) => {
-      const av = sortKey === "inboundAt" ? a.inboundAt : a.username;
-      const bv = sortKey === "inboundAt" ? b.inboundAt : b.username;
-      const cmp = av.localeCompare(bv);
-      return sortDir === "asc" ? cmp : -cmp;
-    });
-    return items;
-  }, [filter, records, sortKey, sortDir]);
-
   const visibleSelectedCount = useMemo(
-    () => sorted.filter((a) => selected.has(a.id)).length,
-    [selected, sorted]
+    () => records.filter((a) => selected.has(a.id)).length,
+    [selected, records]
   );
 
   const toggleSort = (key: SortKey) => {
+    setPage(1);
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -156,7 +160,7 @@ export default function InventoryPage() {
   };
 
   const toggleAll = () => {
-    const visibleIds = new Set(sorted.map((a) => a.id));
+    const visibleIds = new Set(records.map((a) => a.id));
     setSelected((prev) => {
       const allVisibleSelected =
         visibleIds.size > 0 && [...visibleIds].every((id) => prev.has(id));
@@ -219,7 +223,7 @@ export default function InventoryPage() {
 
   const rowPadding = density === "compact" ? "py-2" : "py-3.5";
 
-  if (loading) {
+  if (loading && records.length === 0 && total === 0) {
     return (
       <div className="space-y-4">
         <div>
@@ -262,7 +266,7 @@ export default function InventoryPage() {
     );
   }
 
-  if (records.length === 0) {
+  if (total === 0 && !filter.trim()) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
         <PackageOpen className="h-12 w-12 text-muted-foreground" />
@@ -280,16 +284,19 @@ export default function InventoryPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">库存列表</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            共 {records.length} 条 · 默认按 FIFO 入库时间排序
+            共 {total} 条 · 默认按 FIFO 入库时间排序
           </p>
         </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
         <Input
-          placeholder="本页过滤…"
+          placeholder="搜索库存"
           value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          onChange={(e) => {
+            setPage(1);
+            setFilter(e.target.value);
+          }}
           className="max-w-xs"
         />
         <Button
@@ -312,7 +319,7 @@ export default function InventoryPage() {
           size="sm"
           disabled={visibleSelectedCount === 0}
           onClick={() => {
-            const lines = sorted
+            const lines = records
               .filter((a) => selected.has(a.id))
               .map((a) =>
                 formatAccountLine(
@@ -360,7 +367,7 @@ export default function InventoryPage() {
         </Card>
       )}
 
-      {sorted.length === 0 ? (
+      {records.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-sm text-muted-foreground">
             没有匹配的库存记录
@@ -378,8 +385,8 @@ export default function InventoryPage() {
                     </th>
                     <th className="w-10 px-4 py-3">
                       <button type="button" onClick={toggleAll}>
-                        {visibleSelectedCount === sorted.length &&
-                        sorted.length > 0 ? (
+                        {visibleSelectedCount === records.length &&
+                        records.length > 0 ? (
                           <CheckSquare className="h-4 w-4 text-primary" />
                         ) : (
                           <Square className="h-4 w-4 text-muted-foreground" />
@@ -396,12 +403,8 @@ export default function InventoryPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.map((account, index) => {
-                    const isFirst =
-                      sortKey === "inboundAt" &&
-                      sortDir === "asc" &&
-                      index === 0 &&
-                      !filter;
+                  {records.map((account, index) => {
+                    const isFirst = showFifoBadge && index === 0;
                     const rowError = outboundRowErrors[account.id];
                     return (
                       <tr
@@ -529,22 +532,18 @@ export default function InventoryPage() {
             <div className="space-y-2 p-3 md:hidden">
               <div className="flex items-center gap-2 border-b border-border pb-2">
                 <button type="button" onClick={toggleAll}>
-                  {visibleSelectedCount === sorted.length && sorted.length > 0 ? (
+                  {visibleSelectedCount === records.length && records.length > 0 ? (
                     <CheckSquare className="h-4 w-4 text-primary" />
                   ) : (
                     <Square className="h-4 w-4 text-muted-foreground" />
                   )}
                 </button>
                 <span className="text-xs text-muted-foreground">
-                  全选 ({visibleSelectedCount}/{sorted.length})
+                  全选 ({visibleSelectedCount}/{records.length})
                 </span>
               </div>
-              {sorted.map((account, index) => {
-                const isFirst =
-                  sortKey === "inboundAt" &&
-                  sortDir === "asc" &&
-                  index === 0 &&
-                  !filter;
+              {records.map((account, index) => {
+                const isFirst = showFifoBadge && index === 0;
                 const rowError = outboundRowErrors[account.id];
                 return (
                   <div
@@ -637,6 +636,15 @@ export default function InventoryPage() {
           </CardContent>
         </Card>
       )}
+
+      <Pagination
+        total={total}
+        page={page}
+        pageSize={pageSize}
+        totalPages={totalPages}
+        onPageChange={setPage}
+        disabled={loading}
+      />
     </div>
   );
 }

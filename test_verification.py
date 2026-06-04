@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import gc
 import sqlite3
 import subprocess
 import sys
@@ -2285,6 +2286,296 @@ def test_api_history_endpoints_and_filters() -> None:
     assert len(search_q.json()["records"]) == 2
 
 
+def test_pagination_normalize_helpers() -> None:
+    from api import (
+        DEFAULT_PAGE_SIZE,
+        MAX_PAGE_SIZE,
+        _normalize_pagination,
+        _total_pages,
+    )
+
+    page, page_size, offset = _normalize_pagination(page=0, page_size=999)
+    assert page == 1
+    assert page_size == MAX_PAGE_SIZE
+    assert offset == 0
+
+    page, page_size, offset = _normalize_pagination(page=2, page_size=50)
+    assert page == 2
+    assert page_size == DEFAULT_PAGE_SIZE
+    assert offset == 50
+
+    assert _total_pages(0, 50) == 0
+    assert _total_pages(51, 50) == 2
+
+
+def test_api_inventory_pagination_filter_sort() -> None:
+    _reset_inventory()
+    for index in range(5):
+        db.insert_account(f"inv_page_{index}", f"pw{index}", email=f"mail{index}@x.com")
+    db.set_account_note("inv_page_2", "special-note")
+
+    client = _api_client()
+
+    filtered = client.get(
+        "/api/inventory",
+        params={"q": "special-note", "page": 1, "pageSize": 10},
+    )
+    payload = filtered.json()
+    assert payload["total"] == 1
+    assert len(payload["records"]) == 1
+    assert payload["records"][0]["username"] == "inv_page_2"
+
+    page1 = client.get(
+        "/api/inventory",
+        params={"page": 1, "pageSize": 2, "sortBy": "username", "sortDir": "asc"},
+    ).json()
+    assert page1["total"] == 5
+    assert page1["totalPages"] == 3
+    assert [row["username"] for row in page1["records"]] == [
+        "inv_page_0",
+        "inv_page_1",
+    ]
+
+    page2 = client.get(
+        "/api/inventory",
+        params={"page": 2, "pageSize": 2, "sortBy": "username", "sortDir": "asc"},
+    ).json()
+    assert [row["username"] for row in page2["records"]] == [
+        "inv_page_2",
+        "inv_page_3",
+    ]
+
+
+def test_api_history_pagination_counts() -> None:
+    _reset_inventory()
+    for index in range(4):
+        db.insert_account(f"hist_page_{index}", "pw")
+        db.outbound_by_username(f"hist_page_{index}")
+
+    client = _api_client()
+    outbound = client.get(
+        "/api/outbound/history",
+        params={"page": 1, "pageSize": 2},
+    ).json()
+    assert outbound["total"] == 4
+    assert len(outbound["records"]) == 2
+    assert outbound["totalPages"] == 2
+
+    page2 = client.get(
+        "/api/outbound/history",
+        params={"page": 2, "pageSize": 2},
+    ).json()
+    assert len(page2["records"]) == 2
+
+    inbound = client.get(
+        "/api/inbound/history",
+        params={"page": 1, "pageSize": 3},
+    ).json()
+    assert inbound["total"] == 4
+    assert len(inbound["records"]) == 3
+
+
+def test_api_outbound_history_inventory_usernames() -> None:
+    _reset_inventory()
+    db.insert_account("rein_user", "pw1")
+    db.outbound_by_username("rein_user")
+    db.insert_outbound_record("gone_user", "pw2")
+    db.insert_account("rein_user", "pw1")
+
+    client = _api_client()
+    payload = client.get(
+        "/api/outbound/history",
+        params={"pageSize": 200},
+    ).json()
+
+    page_usernames = {row["username"] for row in payload["records"]}
+    inventory_usernames = set(payload["inventoryUsernames"])
+
+    assert page_usernames == {"rein_user", "gone_user"}
+    assert inventory_usernames == {"rein_user"}
+    assert "inventoryUsernames" in payload
+
+
+def test_api_unified_history_inventory_usernames_outbound_only() -> None:
+    _reset_inventory()
+    db.insert_account("out_rein", "pw1")
+    db.outbound_by_username("out_rein")
+    db.insert_account("out_rein", "pw1")
+
+    db.insert_account("out_gone", "pw2")
+    db.outbound_by_username("out_gone")
+
+    db.insert_account("in_still", "pw3")
+
+    client = _api_client()
+    payload = client.get(
+        "/api/history",
+        params={"type": "all", "pageSize": 200},
+    ).json()
+
+    inventory_usernames = set(payload["inventoryUsernames"])
+    outbound_on_page = {
+        row["username"] for row in payload["records"] if row["type"] == "outbound"
+    }
+    inbound_on_page = {
+        row["username"] for row in payload["records"] if row["type"] == "inbound"
+    }
+
+    assert outbound_on_page == {"out_rein", "out_gone"}
+    assert "in_still" in inbound_on_page
+    assert inventory_usernames == {"out_rein"}
+    assert "out_gone" not in inventory_usernames
+    assert "in_still" not in inventory_usernames
+
+
+def test_api_history_pagination_inventory_usernames_scoped_to_page() -> None:
+    _reset_inventory()
+    for index in range(3):
+        username = f"page_inv_{index}"
+        db.insert_account(username, "pw")
+        db.outbound_by_username(username)
+        if index == 1:
+            db.insert_account(username, "pw")
+
+    client = _api_client()
+    page1 = client.get(
+        "/api/outbound/history",
+        params={"page": 1, "pageSize": 2},
+    ).json()
+    page2 = client.get(
+        "/api/outbound/history",
+        params={"page": 2, "pageSize": 2},
+    ).json()
+
+    assert set(page1["inventoryUsernames"]) <= {
+        row["username"] for row in page1["records"]
+    }
+    assert set(page2["inventoryUsernames"]) <= {
+        row["username"] for row in page2["records"]
+    }
+    assert set(page1["inventoryUsernames"]) | set(page2["inventoryUsernames"]) == {
+        "page_inv_1"
+    }
+
+
+def test_api_unified_history_pagination_matches_legacy_merge() -> None:
+    _reset_inventory()
+    db.insert_account("uni_a", "pw")
+    db.insert_account("uni_b", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-01 08:00:00", "uni_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-01 09:00:00", "uni_b"),
+        )
+    db.outbound_by_username("uni_a")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-01 10:00:00", "uni_a"),
+        )
+
+    legacy = db.list_unified_history(history_type="all")
+    legacy_ids = [f"{row['type']}-{row['id']}" for row in legacy]
+
+    client = _api_client()
+    paged_ids: list[str] = []
+    page = 1
+    while True:
+        response = client.get(
+            "/api/history",
+            params={"type": "all", "page": page, "pageSize": 2},
+        ).json()
+        paged_ids.extend(record["id"] for record in response["records"])
+        if page >= response["totalPages"]:
+            break
+        page += 1
+
+    assert paged_ids == [f"{row['type']}-{row['id']}" for row in legacy]
+    assert len(paged_ids) == len(set(paged_ids))
+
+
+def test_api_search_pagination_source_all() -> None:
+    _reset_inventory()
+    for index in range(3):
+        db.insert_account(f"search_inv_{index}", "pw", email=f"shared{index}@mail.test")
+    for index in range(2):
+        db.insert_outbound_record(
+            f"search_hist_{index}",
+            "pw",
+            email=f"shared_hist{index}@mail.test",
+        )
+
+    client = _api_client()
+    query = "shared"
+    inv_payload = client.get(
+        "/api/search",
+        params={"q": query, "source": "inventory", "pageSize": 2, "page": 1},
+    ).json()
+    hist_payload = client.get(
+        "/api/search",
+        params={"q": query, "source": "history", "pageSize": 2, "page": 1},
+    ).json()
+    assert inv_payload["total"] == 3
+    assert hist_payload["total"] == 2
+    assert inv_payload["inventoryTotal"] == 3
+    assert inv_payload["historyTotal"] == 2
+    assert hist_payload["inventoryTotal"] == 3
+    assert hist_payload["historyTotal"] == 2
+    assert len(inv_payload["results"]) == 2
+    assert len(hist_payload["results"]) == 2
+    assert inv_payload["inventoryTotal"] + inv_payload["historyTotal"] == 5
+    assert hist_payload["inventoryTotal"] + hist_payload["historyTotal"] == 5
+
+    page1 = client.get(
+        "/api/search",
+        params={"q": query, "source": "all", "page": 1, "pageSize": 2},
+    ).json()
+    assert page1["inventoryTotal"] == 3
+    assert page1["historyTotal"] == 2
+    assert page1["total"] == 5
+    assert page1["inventoryTotal"] + page1["historyTotal"] == page1["total"]
+    assert len(page1["results"]) == 2
+    assert all(item["source"] == "inventory" for item in page1["results"])
+
+    page2 = client.get(
+        "/api/search",
+        params={"q": query, "source": "all", "page": 2, "pageSize": 2},
+    ).json()
+    assert len(page2["results"]) == 2
+    assert page2["results"][0]["source"] == "inventory"
+    assert page2["results"][1]["source"] == "history"
+
+    page3 = client.get(
+        "/api/search",
+        params={"q": query, "source": "all", "page": 3, "pageSize": 2},
+    ).json()
+    assert len(page3["results"]) == 1
+    assert page3["results"][0]["source"] == "history"
+
+
+def test_api_history_export_matches_total() -> None:
+    _reset_inventory()
+    db.insert_account("export_a", "pw1")
+    db.insert_account("export_b", "pw2")
+    db.outbound_by_username("export_a")
+
+    client = _api_client()
+    listed = client.get(
+        "/api/history",
+        params={"type": "all", "pageSize": 200},
+    ).json()
+    exported = client.get(
+        "/api/history/export",
+        params={"type": "all"},
+    ).json()
+    assert exported["count"] == listed["total"]
+    assert exported["count"] == len(exported["text"].splitlines())
+
+
 def test_api_outbound_history_empty() -> None:
     _reset_inventory()
     client = _api_client()
@@ -2488,8 +2779,22 @@ def test_api_clipboard_ignore() -> None:
     assert api._ignored_clipboard_text is None
 
 
+def _reset_database_registry_to_single_default() -> None:
+    records = db.list_databases()
+    default = next((record for record in records if record["id"] == "default"), None)
+    target_id = "default" if default is not None else str(records[0]["id"]) if records else ""
+    if not target_id:
+        db.init_db()
+        return
+    db.set_active_database(target_id)
+    for record in db.list_databases():
+        if record["id"] != target_id:
+            db.delete_database(record["id"])
+
+
 def test_api_database_management() -> None:
     _reset_inventory()
+    _reset_database_registry_to_single_default()
     db.insert_account("api_default", "pw")
     default = db.get_active_database_info()
     client = _api_client()
@@ -2573,13 +2878,20 @@ def test_api_database_management() -> None:
         assert cloned_deleted.status_code == 200
         assert cloned_deleted.json()["id"] == default["id"]
 
+        gc.collect()
+        time.sleep(0.1)
         replacement = client.delete(
             f"/api/databases/{default['id']}",
             headers={"X-Update-Token": "secret"},
         )
-        assert replacement.status_code == 200
-        assert replacement.json()["name"] == "默认数据库"
+        assert replacement.status_code == 200, replacement.text
+        replacement_payload = replacement.json()
+        assert replacement_payload["name"] == "默认数据库"
+        assert replacement_payload["active"] is True
+        assert replacement_payload["id"] == "default"
         assert db.count_inventory() == 0
+        assert len(db.list_databases()) == 1
+        assert db.get_active_database()["id"] == "default"
 
 
 def test_updater_version_compare() -> None:
@@ -3286,6 +3598,27 @@ def run_all() -> tuple[int, list[str]]:
         ("api outbound by username note without overwrite", test_api_outbound_by_username_note_without_overwrite),
         ("note overwrite logic mirror", test_note_overwrite_logic_mirror),
         ("web note overwrite vitest", test_web_note_overwrite_vitest),
+        ("pagination normalize helpers", test_pagination_normalize_helpers),
+        ("api inventory pagination", test_api_inventory_pagination_filter_sort),
+        ("api history pagination counts", test_api_history_pagination_counts),
+        (
+            "api outbound history inventory usernames",
+            test_api_outbound_history_inventory_usernames,
+        ),
+        (
+            "api unified history inventory usernames",
+            test_api_unified_history_inventory_usernames_outbound_only,
+        ),
+        (
+            "api history pagination inventory usernames",
+            test_api_history_pagination_inventory_usernames_scoped_to_page,
+        ),
+        (
+            "api unified history pagination",
+            test_api_unified_history_pagination_matches_legacy_merge,
+        ),
+        ("api search pagination source all", test_api_search_pagination_source_all),
+        ("api history export", test_api_history_export_matches_total),
         ("api search inventory and history", test_api_search_inventory_and_history),
         ("api inventory empty", test_api_inventory_empty),
         ("api inventory ordered", test_api_inventory_real_records_ordered),
