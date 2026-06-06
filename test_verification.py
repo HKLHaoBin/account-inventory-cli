@@ -2681,6 +2681,286 @@ def test_api_unified_history_direct_outbound_date_filter() -> None:
     assert records[0]["outboundAt"] == "2026-06-05 14:00:00"
 
 
+def test_kline_mixed_events_ohlc() -> None:
+    _reset_inventory()
+    db.insert_account("kline_a", "pw")
+    db.insert_account("kline_b", "pw")
+    db.outbound_by_username("kline_a")
+    db.insert_outbound_record("direct_kline", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 09:00:00", "kline_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:00:00", "kline_b"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-07 11:00:00", "kline_a"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-07 12:00:00", "direct_kline"),
+        )
+
+    result = db.build_history_kline(
+        from_ts="2026-06-07 08:00:00",
+        to_ts="2026-06-07 13:00:00",
+        bucket="hour",
+    )
+    candles = {row["time"]: row for row in result["candles"]}
+
+    assert candles["2026-06-07T09:00:00"]["open"] == 0
+    assert candles["2026-06-07T09:00:00"]["close"] == 1
+    assert candles["2026-06-07T10:00:00"]["close"] == 2
+    assert candles["2026-06-07T11:00:00"]["close"] == 1
+    assert candles["2026-06-07T12:00:00"]["open"] == 1
+    assert candles["2026-06-07T12:00:00"]["close"] == 1
+
+    assert result["totals"]["inboundCount"] == 2
+    assert result["totals"]["outboundCount"] == 2
+    assert result["totals"]["stockOutboundCount"] == 1
+    assert result["totals"]["netChange"] == 1
+
+
+def test_kline_direct_outbound_counts_only() -> None:
+    _reset_inventory()
+    db.insert_outbound_record("direct_only", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-07 15:00:00", "direct_only"),
+        )
+
+    result = db.build_history_kline(
+        from_ts="2026-06-07 14:00:00",
+        to_ts="2026-06-07 16:00:00",
+        bucket="hour",
+    )
+    candle = next(
+        row for row in result["candles"] if row["time"] == "2026-06-07T15:00:00"
+    )
+    assert candle["open"] == candle["high"] == candle["low"] == candle["close"] == 0
+    assert candle["outboundCount"] == 1
+    assert candle["stockOutboundCount"] == 0
+    assert candle["netChange"] == 0
+    assert result["totals"]["netChange"] == 0
+
+
+def test_kline_empty_bucket_continuity() -> None:
+    _reset_inventory()
+    db.insert_account("gap_a", "pw")
+    db.insert_account("gap_b", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-01 10:00:00", "gap_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-03 10:00:00", "gap_b"),
+        )
+
+    result = db.build_history_kline(
+        from_ts="2026-06-01 00:00:00",
+        to_ts="2026-06-03 23:59:59",
+        bucket="day",
+    )
+    candles = {row["time"]: row for row in result["candles"]}
+
+    assert candles["2026-06-01T00:00:00"]["close"] == 1
+    assert (
+        candles["2026-06-02T00:00:00"]["open"]
+        == candles["2026-06-02T00:00:00"]["close"]
+        == 1
+    )
+    assert candles["2026-06-03T00:00:00"]["close"] == 2
+
+
+def test_kline_bucket_boundaries() -> None:
+    _reset_inventory()
+    db.insert_account("bucket_user", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:30:00", "bucket_user"),
+        )
+
+    hour = db.build_history_kline(
+        from_ts="2026-06-07 10:00:00",
+        to_ts="2026-06-07 10:59:59",
+        bucket="hour",
+    )
+    assert hour["candles"][0]["time"] == "2026-06-07T10:00:00"
+    assert hour["candles"][0]["close"] == 1
+
+    day = db.build_history_kline(
+        from_ts="2026-06-07 00:00:00",
+        to_ts="2026-06-07 23:59:59",
+        bucket="day",
+    )
+    assert day["candles"][0]["time"] == "2026-06-07T00:00:00"
+
+    week = db.build_history_kline(
+        from_ts="2026-06-07 00:00:00",
+        to_ts="2026-06-07 23:59:59",
+        bucket="week",
+    )
+    assert week["candles"][0]["time"] == "2026-06-01T00:00:00"
+
+    month = db.build_history_kline(
+        from_ts="2026-06-07 00:00:00",
+        to_ts="2026-06-07 23:59:59",
+        bucket="month",
+    )
+    assert month["candles"][0]["time"] == "2026-06-01T00:00:00"
+
+
+def test_kline_filters_q_and_ranges() -> None:
+    _reset_inventory()
+    db.insert_account("filter_a", "pw", email="alpha@filter.test")
+    db.insert_account("filter_b", "pw", email="beta@filter.test")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-01 10:00:00", "filter_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-02 10:00:00", "filter_b"),
+        )
+
+    q_result = db.build_history_kline(
+        from_ts="2026-06-01 00:00:00",
+        to_ts="2026-06-02 23:59:59",
+        bucket="day",
+        query="alpha@filter.test",
+    )
+    assert q_result["totals"]["inboundCount"] == 1
+    assert q_result["totals"]["netChange"] == 1
+
+    range_result = db.build_history_kline(
+        from_ts="2026-06-01 00:00:00",
+        to_ts="2026-06-02 23:59:59",
+        bucket="day",
+        range_tokens=["2026-06-01"],
+    )
+    assert range_result["totals"]["inboundCount"] == 1
+
+    unified = db.list_unified_history(
+        query="alpha@filter.test",
+        range_tokens=["2026-06-01"],
+    )
+    assert len(unified) == 1
+    assert unified[0]["username"] == "filter_a"
+
+
+def test_api_history_kline_stable_shape() -> None:
+    _reset_inventory()
+    client = _api_client()
+
+    default_response = client.get("/api/history/kline")
+    assert default_response.status_code == 200
+    payload = default_response.json()
+    assert payload["bucket"] in {"hour", "day", "week", "month"}
+    assert "from" in payload
+    assert "to" in payload
+    assert isinstance(payload["candles"], list)
+    assert len(payload["candles"]) > 0
+    assert payload["totals"] == {
+        "inboundCount": 0,
+        "outboundCount": 0,
+        "stockOutboundCount": 0,
+        "netChange": 0,
+    }
+
+    invalid = client.get(
+        "/api/history/kline",
+        params={"from": "not-a-date", "to": "2026-06-07"},
+    )
+    assert invalid.status_code == 400
+    assert "无效的日期时间" in invalid.json()["detail"]
+
+    auto = client.get(
+        "/api/history/kline",
+        params={
+            "from": "2026-06-07 00:00:00",
+            "to": "2026-06-07 23:59:59",
+            "bucket": "auto",
+        },
+    )
+    assert auto.status_code == 200
+    assert auto.json()["bucket"] == "hour"
+
+
+def test_api_history_kline_date_only_includes_records() -> None:
+    _reset_inventory()
+    db.insert_account("kline_date_only", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 09:00:00", "kline_date_only"),
+        )
+
+    client = _api_client()
+    date_only = client.get(
+        "/api/history/kline",
+        params={"from": "2026-06-07", "to": "2026-06-07", "bucket": "hour"},
+    )
+    assert date_only.status_code == 200
+    payload = date_only.json()
+    assert payload["totals"]["inboundCount"] == 1
+    assert payload["totals"]["netChange"] == 1
+
+    iso_range = client.get(
+        "/api/history/kline",
+        params={
+            "from": "2026-06-07T00:00:00",
+            "to": "2026-06-07T23:59:59",
+            "bucket": "hour",
+        },
+    )
+    assert iso_range.status_code == 200
+    iso_payload = iso_range.json()
+    assert iso_payload["totals"]["inboundCount"] == 1
+    assert iso_payload["totals"]["netChange"] == 1
+    assert iso_payload["totals"] == payload["totals"]
+
+
+def test_api_history_kline_outbound_totals() -> None:
+    _reset_inventory()
+    db.insert_account("kline_out_stock", "pw")
+    db.outbound_by_username("kline_out_stock")
+    db.insert_outbound_record("kline_out_direct", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 09:00:00", "kline_out_stock"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:00:00", "kline_out_stock"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-07 11:00:00", "kline_out_direct"),
+        )
+
+    client = _api_client()
+    response = client.get(
+        "/api/history/kline",
+        params={"from": "2026-06-07", "to": "2026-06-07", "bucket": "hour"},
+    )
+    assert response.status_code == 200
+    totals = response.json()["totals"]
+    assert totals["inboundCount"] == 1
+    assert totals["outboundCount"] == 2
+    assert totals["stockOutboundCount"] == 1
+    assert totals["netChange"] == 0
+
+
 def test_api_outbound_by_username() -> None:
     _reset_inventory()
     db.insert_account("target", "pw", email="target@mail.test")
@@ -3674,6 +3954,17 @@ def run_all() -> tuple[int, list[str]]:
             "api unified direct outbound filter",
             test_api_unified_history_direct_outbound_date_filter,
         ),
+        ("kline mixed events ohlc", test_kline_mixed_events_ohlc),
+        ("kline direct outbound counts only", test_kline_direct_outbound_counts_only),
+        ("kline empty bucket continuity", test_kline_empty_bucket_continuity),
+        ("kline bucket boundaries", test_kline_bucket_boundaries),
+        ("kline filters q and ranges", test_kline_filters_q_and_ranges),
+        ("api history kline stable shape", test_api_history_kline_stable_shape),
+        (
+            "api history kline date only includes records",
+            test_api_history_kline_date_only_includes_records,
+        ),
+        ("api history kline outbound totals", test_api_history_kline_outbound_totals),
         ("api outbound by username", test_api_outbound_by_username),
         ("api outbound paste commit", test_api_outbound_paste_commit),
         ("api clipboard ignore", test_api_clipboard_ignore),

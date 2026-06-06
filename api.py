@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import math
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import clipboard
 import database as db
@@ -133,6 +134,35 @@ class HistoryPayload(BaseModel):
 class HistoryExportPayload(BaseModel):
     text: str
     count: int
+
+
+class KlineCandlePayload(BaseModel):
+    time: str
+    open: int
+    high: int
+    low: int
+    close: int
+    inboundCount: int
+    outboundCount: int
+    stockOutboundCount: int
+    netChange: int
+
+
+class KlineTotalsPayload(BaseModel):
+    inboundCount: int
+    outboundCount: int
+    stockOutboundCount: int
+    netChange: int
+
+
+class KlinePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    bucket: Literal["hour", "day", "week", "month"]
+    from_: str = Field(alias="from")
+    to: str
+    candles: list[KlineCandlePayload]
+    totals: KlineTotalsPayload
 
 
 class SearchResultPayload(BaseModel):
@@ -517,6 +547,48 @@ def _separator_rule_payload(row: dict) -> SeparatorRulePayload:
 
 def _parse_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _parse_kline_datetime(value: str | None, *, end_of_day: bool = False) -> datetime | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            parsed = datetime.fromisoformat(text)
+            if end_of_day:
+                return parsed.replace(hour=23, minute=59, second=59, microsecond=0)
+            return parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+        return datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"无效的日期时间：{text}") from exc
+
+
+def _resolve_kline_range(
+    from_value: str | None,
+    to_value: str | None,
+) -> tuple[str, str]:
+    now = datetime.now().replace(microsecond=0)
+    to_dt = _parse_kline_datetime(to_value, end_of_day=True) or now
+    from_dt = _parse_kline_datetime(from_value) or (to_dt - timedelta(days=90))
+    if from_dt > to_dt:
+        raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
+    return (
+        from_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        to_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
+def _kline_payload(row: dict) -> KlinePayload:
+    return KlinePayload(
+        bucket=row["bucket"],
+        from_=row["from"],
+        to=row["to"],
+        candles=[KlineCandlePayload(**candle) for candle in row["candles"]],
+        totals=KlineTotalsPayload(**row["totals"]),
+    )
 
 
 def _preview_rows_from_lines(lines: list[str]) -> list[InboundPreviewRow]:
@@ -1012,6 +1084,25 @@ def export_history(
     lines = [_format_account_row(row) for row in rows]
     text = "\n".join(line for line in lines if line)
     return HistoryExportPayload(text=text, count=len(rows))
+
+
+@app.get("/api/history/kline", response_model=KlinePayload)
+def get_history_kline(
+    from_value: str | None = Query(default=None, alias="from"),
+    to_value: str | None = Query(default=None, alias="to"),
+    bucket: Literal["auto", "hour", "day", "week", "month"] = "auto",
+    q: str = "",
+    ranges: list[str] = Query(default=[]),
+) -> KlinePayload:
+    from_ts, to_ts = _resolve_kline_range(from_value, to_value)
+    result = db.build_history_kline(
+        from_ts=from_ts,
+        to_ts=to_ts,
+        bucket=bucket,
+        query=q.strip(),
+        range_tokens=ranges,
+    )
+    return _kline_payload(result)
 
 
 @app.get("/api/runtime/update-status")

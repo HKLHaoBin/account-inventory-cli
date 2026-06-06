@@ -9,7 +9,7 @@ import json
 import shutil
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1428,6 +1428,318 @@ def export_history_records(
         query=query,
         range_tokens=range_tokens,
     )
+
+
+def _parse_kline_timestamp(value: str) -> datetime:
+    text = value.strip()
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return datetime.fromisoformat(text)
+    if "T" in text:
+        text = text.replace("T", " ", 1)
+    return datetime.fromisoformat(text)
+
+
+def _format_kline_sql_timestamp(value: datetime) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_kline_api_timestamp(value: datetime) -> str:
+    return value.isoformat(timespec="seconds")
+
+
+def _format_kline_bucket_time(value: datetime) -> str:
+    return _format_kline_api_timestamp(value)
+
+
+def _stock_delta(event: dict[str, Any]) -> int:
+    if event["type"] == "inbound":
+        return 1
+    if event["type"] == "outbound":
+        if event.get("inbound_record_id") is not None:
+            return -1
+    return 0
+
+
+def _append_kline_time_bounds(
+    where_sql: str,
+    params: list[Any],
+    column: str,
+    *,
+    lower: str | None = None,
+    upper: str | None = None,
+    upper_exclusive: bool = False,
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    bound_params: list[Any] = []
+    if lower is not None:
+        clauses.append(f"{column} >= ?")
+        bound_params.append(lower)
+    if upper is not None:
+        op = "<" if upper_exclusive else "<="
+        clauses.append(f"{column} {op} ?")
+        bound_params.append(upper)
+    if not clauses:
+        return where_sql, params
+    extra = " AND ".join(clauses)
+    if where_sql:
+        return f"{where_sql} AND {extra}", [*params, *bound_params]
+    return f"WHERE {extra}", bound_params
+
+
+def _fetch_kline_events(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+    lower: str | None = None,
+    upper: str | None = None,
+    upper_exclusive: bool = False,
+) -> list[dict[str, Any]]:
+    inbound_where, inbound_params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ir.inbound_at",
+        table_alias="ir",
+    )
+    outbound_where, outbound_params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ob.outbound_at",
+        table_alias="ob",
+    )
+    inbound_where, inbound_params = _append_kline_time_bounds(
+        inbound_where,
+        inbound_params,
+        "ir.inbound_at",
+        lower=lower,
+        upper=upper,
+        upper_exclusive=upper_exclusive,
+    )
+    outbound_where, outbound_params = _append_kline_time_bounds(
+        outbound_where,
+        outbound_params,
+        "ob.outbound_at",
+        lower=lower,
+        upper=upper,
+        upper_exclusive=upper_exclusive,
+    )
+    sql = f"""
+        SELECT type, id, timestamp, inbound_record_id
+        FROM (
+            SELECT 'inbound' AS type, ir.id, ir.inbound_at AS timestamp,
+                   NULL AS inbound_record_id
+            FROM inbound_records AS ir
+            LEFT JOIN account_notes AS an ON an.username = ir.username
+            {inbound_where}
+            UNION ALL
+            SELECT 'outbound' AS type, ob.id, ob.outbound_at AS timestamp,
+                   ob.inbound_record_id
+            FROM outbound_records AS ob
+            LEFT JOIN account_notes AS an ON an.username = ob.username
+            {outbound_where}
+        )
+        ORDER BY timestamp ASC, type ASC, id ASC
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, [*inbound_params, *outbound_params]).fetchall()
+    return [
+        {
+            "type": row["type"],
+            "timestamp": row["timestamp"],
+            "inbound_record_id": row["inbound_record_id"],
+        }
+        for row in rows
+    ]
+
+
+def list_kline_events(
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+    from_ts: str,
+    to_ts: str,
+) -> list[dict[str, Any]]:
+    return _fetch_kline_events(
+        query=query,
+        range_tokens=range_tokens,
+        lower=from_ts,
+        upper=to_ts,
+    )
+
+
+def _compute_balance_before(
+    from_ts: str,
+    *,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+) -> int:
+    events = _fetch_kline_events(
+        query=query,
+        range_tokens=range_tokens,
+        upper=from_ts,
+        upper_exclusive=True,
+    )
+    return sum(_stock_delta(event) for event in events)
+
+
+def _floor_to_bucket(ts: datetime, bucket: str) -> datetime:
+    if bucket == "hour":
+        return ts.replace(minute=0, second=0, microsecond=0)
+    if bucket == "day":
+        return ts.replace(hour=0, minute=0, second=0, microsecond=0)
+    if bucket == "week":
+        day_start = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        return day_start - timedelta(days=day_start.weekday())
+    if bucket == "month":
+        return ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    raise ValueError(f"unsupported bucket: {bucket}")
+
+
+def _next_bucket(ts: datetime, bucket: str) -> datetime:
+    if bucket == "hour":
+        return ts + timedelta(hours=1)
+    if bucket == "day":
+        return ts + timedelta(days=1)
+    if bucket == "week":
+        return ts + timedelta(weeks=1)
+    if bucket == "month":
+        if ts.month == 12:
+            return ts.replace(year=ts.year + 1, month=1)
+        return ts.replace(month=ts.month + 1)
+    raise ValueError(f"unsupported bucket: {bucket}")
+
+
+def _iter_buckets(from_ts: datetime, to_ts: datetime, bucket: str):
+    current = _floor_to_bucket(from_ts, bucket)
+    end = _floor_to_bucket(to_ts, bucket)
+    while current <= end:
+        yield current
+        current = _next_bucket(current, bucket)
+
+
+def _count_buckets(from_ts: datetime, to_ts: datetime, bucket: str) -> int:
+    return sum(1 for _ in _iter_buckets(from_ts, to_ts, bucket))
+
+
+def resolve_auto_bucket(from_ts: str, to_ts: str) -> str:
+    from_dt = _parse_kline_timestamp(from_ts)
+    to_dt = _parse_kline_timestamp(to_ts)
+    span_days = (to_dt - from_dt).total_seconds() / 86400
+    if span_days <= 2:
+        chosen = "hour"
+    elif span_days <= 120:
+        chosen = "day"
+    elif span_days <= 730:
+        chosen = "week"
+    else:
+        chosen = "month"
+
+    order = ["hour", "day", "week", "month"]
+    index = order.index(chosen)
+    while index < len(order):
+        bucket = order[index]
+        if _count_buckets(from_dt, to_dt, bucket) <= 500:
+            return bucket
+        index += 1
+    return "month"
+
+
+def build_history_kline(
+    *,
+    from_ts: str,
+    to_ts: str,
+    bucket: str,
+    query: str = "",
+    range_tokens: list[str] | None = None,
+) -> dict[str, Any]:
+    from_dt = _parse_kline_timestamp(from_ts)
+    to_dt = _parse_kline_timestamp(to_ts)
+    from_sql = _format_kline_sql_timestamp(from_dt)
+    to_sql = _format_kline_sql_timestamp(to_dt)
+    resolved_bucket = (
+        resolve_auto_bucket(from_sql, to_sql) if bucket == "auto" else bucket
+    )
+
+    balance = _compute_balance_before(
+        from_sql,
+        query=query,
+        range_tokens=range_tokens,
+    )
+    events = list_kline_events(
+        query=query,
+        range_tokens=range_tokens,
+        from_ts=from_sql,
+        to_ts=to_sql,
+    )
+    events_by_bucket: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        bucket_start = _floor_to_bucket(
+            _parse_kline_timestamp(event["timestamp"]),
+            resolved_bucket,
+        )
+        key = _format_kline_bucket_time(bucket_start)
+        events_by_bucket.setdefault(key, []).append(event)
+
+    candles: list[dict[str, Any]] = []
+    totals = {
+        "inboundCount": 0,
+        "outboundCount": 0,
+        "stockOutboundCount": 0,
+        "netChange": 0,
+    }
+    running_balance = balance
+
+    for bucket_start in _iter_buckets(from_dt, to_dt, resolved_bucket):
+        bucket_key = _format_kline_bucket_time(bucket_start)
+        bucket_events = events_by_bucket.get(bucket_key, [])
+
+        open_balance = running_balance
+        high = open_balance
+        low = open_balance
+        close = open_balance
+        inbound_count = 0
+        outbound_count = 0
+        stock_outbound_count = 0
+
+        for event in bucket_events:
+            if event["type"] == "inbound":
+                inbound_count += 1
+            elif event["type"] == "outbound":
+                outbound_count += 1
+                if event.get("inbound_record_id") is not None:
+                    stock_outbound_count += 1
+
+            running_balance += _stock_delta(event)
+            high = max(high, running_balance)
+            low = min(low, running_balance)
+            close = running_balance
+
+        net_change = inbound_count - stock_outbound_count
+        candles.append(
+            {
+                "time": bucket_key,
+                "open": open_balance,
+                "high": high,
+                "low": low,
+                "close": close,
+                "inboundCount": inbound_count,
+                "outboundCount": outbound_count,
+                "stockOutboundCount": stock_outbound_count,
+                "netChange": net_change,
+            }
+        )
+        totals["inboundCount"] += inbound_count
+        totals["outboundCount"] += outbound_count
+        totals["stockOutboundCount"] += stock_outbound_count
+        totals["netChange"] += net_change
+
+    return {
+        "bucket": resolved_bucket,
+        "from": _format_kline_api_timestamp(from_dt),
+        "to": _format_kline_api_timestamp(to_dt),
+        "candles": candles,
+        "totals": totals,
+    }
+
 
 def fifo_preview_many(count: int) -> list[dict[str, Any]]:
     if count <= 0:

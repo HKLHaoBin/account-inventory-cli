@@ -14,6 +14,8 @@ import type {
   InboundPreviewRow,
   InboundRecord,
   InventoryPayload,
+  KlineBucket,
+  KlinePayload,
   PaginatedMeta,
   OutboundByUsernamePayload,
   OutboundFromInboundHistoryPayload,
@@ -94,6 +96,26 @@ async function requestJson<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+export function fetchHistoryKline(
+  options: {
+    from?: string;
+    to?: string;
+    bucket?: KlineBucket | "auto";
+    q?: string;
+    ranges?: string[];
+  } = {},
+  init?: Pick<RequestInit, "signal">
+): Promise<KlinePayload> {
+  const query = buildPaginationQuery({
+    from: options.from,
+    to: options.to,
+    bucket: options.bucket,
+    q: options.q,
+    ranges: options.ranges,
+  });
+  return requestJson<KlinePayload>(`/api/history/kline${query}`, init);
 }
 
 export function fetchDashboard(): Promise<DashboardPayload> {

@@ -8,6 +8,7 @@ const tabs = [
   { href: "/history", label: "全部", exact: true },
   { href: "/history/inbound", label: "入库" },
   { href: "/history/outbound", label: "出库" },
+  { href: "/history/trends", label: "趋势", trends: true },
 ] as const;
 
 export function HistoryNav() {
@@ -17,9 +18,11 @@ export function HistoryNav() {
     <nav className="flex flex-wrap gap-2">
       {tabs.map((tab) => {
         const active =
-          "exact" in tab && tab.exact
-            ? pathname === tab.href
-            : pathname.startsWith(tab.href);
+          "trends" in tab && tab.trends
+            ? pathname.startsWith("/history/trends")
+            : "exact" in tab && tab.exact
+              ? pathname === tab.href
+              : pathname.startsWith(tab.href);
         return (
           <Link
             key={tab.href}

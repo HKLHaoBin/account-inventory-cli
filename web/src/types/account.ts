@@ -303,6 +303,35 @@ export interface SeparatorRuleListPayload {
   rules: SeparatorRule[];
 }
 
+export type KlineBucket = "hour" | "day" | "week" | "month";
+
+export interface KlineCandle {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  inboundCount: number;
+  outboundCount: number;
+  stockOutboundCount: number;
+  netChange: number;
+}
+
+export interface KlineTotals {
+  inboundCount: number;
+  outboundCount: number;
+  stockOutboundCount: number;
+  netChange: number;
+}
+
+export interface KlinePayload {
+  bucket: KlineBucket;
+  from: string;
+  to: string;
+  candles: KlineCandle[];
+  totals: KlineTotals;
+}
+
 export interface UpdateStatusPayload {
   timestamp: string;
   state: string;

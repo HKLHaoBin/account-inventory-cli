@@ -26,6 +26,7 @@ import {
 } from "@/components/notes/note-overwrite-logic";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { DashboardTrendCard } from "@/components/dashboard/DashboardTrendCard";
 import { useCategoryStatusFilter } from "@/hooks/use-category-status-filter";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
@@ -1405,6 +1406,8 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      <DashboardTrendCard />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
