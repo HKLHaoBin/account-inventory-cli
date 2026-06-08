@@ -163,6 +163,9 @@ class KlinePayload(BaseModel):
     to: str
     candles: list[KlineCandlePayload]
     totals: KlineTotalsPayload
+    dataFrom: str | None = None
+    dataTo: str | None = None
+    hasData: bool = False
 
 
 class SearchResultPayload(BaseModel):
@@ -581,6 +584,27 @@ def _resolve_kline_range(
     )
 
 
+def _resolve_clamped_kline_window(
+    request_from_dt: datetime,
+    request_to_dt: datetime,
+    data_from_dt: datetime,
+    data_to_dt: datetime,
+) -> tuple[datetime, datetime]:
+    request_span = request_to_dt - request_from_dt
+    data_span = data_to_dt - data_from_dt
+
+    if request_span > data_span:
+        return data_from_dt, data_to_dt
+
+    if request_to_dt < data_from_dt:
+        return data_from_dt, min(data_from_dt + request_span, data_to_dt)
+
+    if request_from_dt > data_to_dt:
+        return max(data_to_dt - request_span, data_from_dt), data_to_dt
+
+    return max(request_from_dt, data_from_dt), min(request_to_dt, data_to_dt)
+
+
 def _kline_payload(row: dict) -> KlinePayload:
     return KlinePayload(
         bucket=row["bucket"],
@@ -588,6 +612,36 @@ def _kline_payload(row: dict) -> KlinePayload:
         to=row["to"],
         candles=[KlineCandlePayload(**candle) for candle in row["candles"]],
         totals=KlineTotalsPayload(**row["totals"]),
+        dataFrom=row.get("dataFrom"),
+        dataTo=row.get("dataTo"),
+        hasData=bool(row.get("hasData", False)),
+    )
+
+
+def _empty_kline_payload(
+    *,
+    from_ts: str,
+    to_ts: str,
+    data_from: str | None,
+    data_to: str | None,
+    has_data: bool,
+) -> KlinePayload:
+    from_dt = db._parse_kline_timestamp(from_ts)
+    to_dt = db._parse_kline_timestamp(to_ts)
+    return KlinePayload(
+        bucket=db.resolve_auto_bucket(from_ts, to_ts),
+        from_=db._format_kline_api_timestamp(from_dt),
+        to=db._format_kline_api_timestamp(to_dt),
+        candles=[],
+        totals=KlineTotalsPayload(
+            inboundCount=0,
+            outboundCount=0,
+            stockOutboundCount=0,
+            netChange=0,
+        ),
+        dataFrom=data_from,
+        dataTo=data_to,
+        hasData=has_data,
     )
 
 
@@ -1095,13 +1149,40 @@ def get_history_kline(
     ranges: list[str] = Query(default=[]),
 ) -> KlinePayload:
     from_ts, to_ts = _resolve_kline_range(from_value, to_value)
+    bounds = db.get_kline_data_bounds(query=q.strip(), range_tokens=ranges)
+
+    if not bounds["hasData"]:
+        return _empty_kline_payload(
+            from_ts=from_ts,
+            to_ts=to_ts,
+            data_from=None,
+            data_to=None,
+            has_data=False,
+        )
+
+    data_from_dt = db._parse_kline_timestamp(bounds["dataFrom"])
+    data_to_dt = db._parse_kline_timestamp(bounds["dataTo"])
+    request_from_dt = db._parse_kline_timestamp(from_ts)
+    request_to_dt = db._parse_kline_timestamp(to_ts)
+    clamped_from_dt, clamped_to_dt = _resolve_clamped_kline_window(
+        request_from_dt,
+        request_to_dt,
+        data_from_dt,
+        data_to_dt,
+    )
+
+    clamped_from_ts = db._format_kline_sql_timestamp(clamped_from_dt)
+    clamped_to_ts = db._format_kline_sql_timestamp(clamped_to_dt)
     result = db.build_history_kline(
-        from_ts=from_ts,
-        to_ts=to_ts,
+        from_ts=clamped_from_ts,
+        to_ts=clamped_to_ts,
         bucket=bucket,
         query=q.strip(),
         range_tokens=ranges,
     )
+    result["dataFrom"] = bounds["dataFrom"]
+    result["dataTo"] = bounds["dataTo"]
+    result["hasData"] = True
     return _kline_payload(result)
 
 

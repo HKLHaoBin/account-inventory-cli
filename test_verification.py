@@ -2857,6 +2857,147 @@ def test_kline_filters_q_and_ranges() -> None:
     assert unified[0]["username"] == "filter_a"
 
 
+def _seed_kline_bounds_fixtures() -> None:
+    db.insert_account("bounds_in_a", "pw")
+    db.insert_account("bounds_in_b", "pw")
+    db.outbound_by_username("bounds_in_a")
+    db.insert_outbound_record("bounds_direct", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-01 09:00:00", "bounds_in_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:00:00", "bounds_in_b"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ? WHERE username = ?",
+            ("2026-06-03 11:00:00", "bounds_in_a"),
+        )
+        conn.execute(
+            "UPDATE outbound_records SET outbound_at = ?, inbound_at = ? WHERE username = ?",
+            ("2026-06-05 12:00:00", "2026-06-05 12:00:00", "bounds_direct"),
+        )
+
+
+def test_kline_data_bounds_with_data() -> None:
+    _reset_inventory()
+    _seed_kline_bounds_fixtures()
+
+    bounds = db.get_kline_data_bounds()
+    assert bounds["hasData"] is True
+    assert bounds["dataFrom"] == "2026-06-01T09:00:00"
+    assert bounds["dataTo"] == "2026-06-07T10:00:00"
+
+
+def test_kline_data_bounds_empty_db() -> None:
+    _reset_inventory()
+
+    bounds = db.get_kline_data_bounds()
+    assert bounds == {"dataFrom": None, "dataTo": None, "hasData": False}
+
+
+def test_kline_data_bounds_respects_filters() -> None:
+    _reset_inventory()
+    _seed_kline_bounds_fixtures()
+
+    q_bounds = db.get_kline_data_bounds(query="bounds_in_b")
+    assert q_bounds["hasData"] is True
+    assert q_bounds["dataFrom"] == "2026-06-07T10:00:00"
+    assert q_bounds["dataTo"] == "2026-06-07T10:00:00"
+
+    range_bounds = db.get_kline_data_bounds(range_tokens=["2026-06-03"])
+    assert range_bounds["hasData"] is True
+    assert range_bounds["dataFrom"] == "2026-06-03T11:00:00"
+    assert range_bounds["dataTo"] == "2026-06-03T11:00:00"
+
+
+def test_api_history_kline_bounds_metadata() -> None:
+    _reset_inventory()
+    _seed_kline_bounds_fixtures()
+    client = _api_client()
+
+    response = client.get(
+        "/api/history/kline",
+        params={"from": "2026-06-01", "to": "2026-06-07", "bucket": "day"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["hasData"] is True
+    assert payload["dataFrom"] == "2026-06-01T09:00:00"
+    assert payload["dataTo"] == "2026-06-07T10:00:00"
+    assert len(payload["candles"]) > 0
+
+    _reset_inventory()
+    empty_response = client.get("/api/history/kline")
+    assert empty_response.status_code == 200
+    empty_payload = empty_response.json()
+    assert empty_payload["hasData"] is False
+    assert empty_payload["dataFrom"] is None
+    assert empty_payload["dataTo"] is None
+    assert empty_payload["candles"] == []
+
+
+def test_api_history_kline_clamps_request() -> None:
+    _reset_inventory()
+    _seed_kline_bounds_fixtures()
+    client = _api_client()
+
+    response = client.get(
+        "/api/history/kline",
+        params={"from": "2017-01-01", "to": "2050-01-01", "bucket": "day"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["hasData"] is True
+    assert payload["dataFrom"] == "2026-06-01T09:00:00"
+    assert payload["dataTo"] == "2026-06-07T10:00:00"
+    assert payload["from"] == "2026-06-01T09:00:00"
+    assert payload["to"] == "2026-06-07T10:00:00"
+    assert payload["totals"]["inboundCount"] > 0
+
+
+def test_api_history_kline_completely_before_data() -> None:
+    _reset_inventory()
+    _seed_kline_bounds_fixtures()
+    client = _api_client()
+
+    response = client.get(
+        "/api/history/kline",
+        params={"from": "2017-01-01", "to": "2018-01-01", "bucket": "day"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["hasData"] is True
+    assert payload["dataFrom"] == "2026-06-01T09:00:00"
+    assert payload["dataTo"] == "2026-06-07T10:00:00"
+    assert payload["from"] == "2026-06-01T09:00:00"
+    assert payload["to"] == "2026-06-07T10:00:00"
+    assert payload["from"] <= payload["to"]
+    assert len(payload["candles"]) > 0
+
+
+def test_api_history_kline_completely_after_data() -> None:
+    _reset_inventory()
+    _seed_kline_bounds_fixtures()
+    client = _api_client()
+
+    response = client.get(
+        "/api/history/kline",
+        params={"from": "2030-01-01", "to": "2031-01-01", "bucket": "day"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["hasData"] is True
+    assert payload["dataFrom"] == "2026-06-01T09:00:00"
+    assert payload["dataTo"] == "2026-06-07T10:00:00"
+    assert payload["from"] == "2026-06-01T09:00:00"
+    assert payload["to"] == "2026-06-07T10:00:00"
+    assert payload["from"] <= payload["to"]
+    assert len(payload["candles"]) > 0
+
+
 def test_api_history_kline_stable_shape() -> None:
     _reset_inventory()
     client = _api_client()
@@ -2868,7 +3009,10 @@ def test_api_history_kline_stable_shape() -> None:
     assert "from" in payload
     assert "to" in payload
     assert isinstance(payload["candles"], list)
-    assert len(payload["candles"]) > 0
+    assert payload["hasData"] is False
+    assert payload["dataFrom"] is None
+    assert payload["dataTo"] is None
+    assert payload["candles"] == []
     assert payload["totals"] == {
         "inboundCount": 0,
         "outboundCount": 0,
@@ -3959,6 +4103,19 @@ def run_all() -> tuple[int, list[str]]:
         ("kline empty bucket continuity", test_kline_empty_bucket_continuity),
         ("kline bucket boundaries", test_kline_bucket_boundaries),
         ("kline filters q and ranges", test_kline_filters_q_and_ranges),
+        ("kline data bounds with data", test_kline_data_bounds_with_data),
+        ("kline data bounds empty db", test_kline_data_bounds_empty_db),
+        ("kline data bounds respects filters", test_kline_data_bounds_respects_filters),
+        ("api history kline bounds metadata", test_api_history_kline_bounds_metadata),
+        ("api history kline clamps request", test_api_history_kline_clamps_request),
+        (
+            "api history kline completely before data",
+            test_api_history_kline_completely_before_data,
+        ),
+        (
+            "api history kline completely after data",
+            test_api_history_kline_completely_after_data,
+        ),
         ("api history kline stable shape", test_api_history_kline_stable_shape),
         (
             "api history kline date only includes records",

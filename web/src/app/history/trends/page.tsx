@@ -2,23 +2,33 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HistoryFilters } from "@/components/history/HistoryFilters";
-import {
-  InventoryKlineChart,
-  type InventoryKlineChartHandle,
-} from "@/components/history/InventoryKlineChart";
+import { InventoryKlineChart } from "@/components/history/InventoryKlineChart";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { fetchHistoryKline } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
-import { padVisibleRange } from "@/lib/kline-range";
+import {
+  clampRangeToDataBounds,
+  loadedRangeCovers,
+  mergeLoadedRange,
+  padVisibleRange,
+  shouldExpandLoadedRange,
+} from "@/lib/kline-range";
 import {
   defaultTrendRangeMs,
   formatLocalDateTime,
+  parseTimeToMs,
 } from "@/lib/kline-time";
 import { cn } from "@/lib/utils";
 import type { DateRangeFilter, KlineBucket, KlinePayload } from "@/types/account";
 
 type BucketMode = "auto" | KlineBucket;
+
+type DataBounds = {
+  dataFromMs: number | null;
+  dataToMs: number | null;
+  hasData: boolean;
+};
 
 const BUCKET_OPTIONS: { value: BucketMode; label: string }[] = [
   { value: "auto", label: "自动" },
@@ -28,11 +38,27 @@ const BUCKET_OPTIONS: { value: BucketMode; label: string }[] = [
   { value: "month", label: "月" },
 ];
 
+function emptyLoadedRange(): { fromMs: number; toMs: number } {
+  return { fromMs: 0, toMs: 0 };
+}
+
+function emptyDataBounds(): DataBounds {
+  return { dataFromMs: null, dataToMs: null, hasData: true };
+}
+
+function boundsFromPayload(payload: KlinePayload): DataBounds {
+  return {
+    dataFromMs: payload.dataFrom ? parseTimeToMs(payload.dataFrom) : null,
+    dataToMs: payload.dataTo ? parseTimeToMs(payload.dataTo) : null,
+    hasData: payload.hasData,
+  };
+}
+
 export default function HistoryTrendsPage() {
-  const chartRef = useRef<InventoryKlineChartHandle>(null);
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<number | null>(null);
-  const requestRangeRef = useRef(defaultTrendRangeMs());
+  const loadedRangeRef = useRef(defaultTrendRangeMs());
+  const dataBoundsRef = useRef<DataBounds>(emptyDataBounds());
   const skipNextZoomRef = useRef(false);
   const initialLoadRef = useRef(true);
 
@@ -45,6 +71,11 @@ export default function HistoryTrendsPage() {
   const [reloadToken, setReloadToken] = useState(0);
   const [shouldFit, setShouldFit] = useState(true);
   const [resetVersion, setResetVersion] = useState(0);
+  const [pendingVisibleRange, setPendingVisibleRange] = useState<{
+    fromMs: number;
+    toMs: number;
+  } | null>(null);
+  const [pendingVisibleRangeVersion, setPendingVisibleRangeVersion] = useState(0);
 
   const rangeValues = useMemo(
     () => ranges.map((item) => item.value),
@@ -55,8 +86,34 @@ export default function HistoryTrendsPage() {
     async (
       fromMs: number,
       toMs: number,
-      options?: { fit?: boolean; bucketOverride?: BucketMode }
+      options?: {
+        fit?: boolean;
+        resetPendingRange?: boolean;
+        bucketOverride?: BucketMode;
+        visibleRange?: { fromMs: number; toMs: number };
+      }
     ) => {
+      const bounds = dataBoundsRef.current;
+      const clamped = clampRangeToDataBounds(fromMs, toMs, {
+        dataFromMs: bounds.dataFromMs,
+        dataToMs: bounds.dataToMs,
+      });
+
+      if (bounds.dataFromMs !== null && !bounds.hasData && !options?.fit) {
+        return;
+      }
+
+      if (
+        !options?.fit &&
+        loadedRangeCovers(loadedRangeRef.current, clamped)
+      ) {
+        return;
+      }
+
+      if (options?.fit || options?.resetPendingRange) {
+        setPendingVisibleRange(null);
+      }
+
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -69,8 +126,8 @@ export default function HistoryTrendsPage() {
       try {
         const payload = await fetchHistoryKline(
           {
-            from: formatLocalDateTime(fromMs),
-            to: formatLocalDateTime(toMs),
+            from: formatLocalDateTime(clamped.fromMs),
+            to: formatLocalDateTime(clamped.toMs),
             bucket: bucketSelection,
             q: query,
             ranges: rangeValues,
@@ -78,10 +135,23 @@ export default function HistoryTrendsPage() {
           { signal: controller.signal }
         );
         if (controller.signal.aborted) return;
-        requestRangeRef.current = { fromMs, toMs };
+
+        const payloadRange = {
+          fromMs: parseTimeToMs(payload.from),
+          toMs: parseTimeToMs(payload.to),
+        };
+        loadedRangeRef.current = mergeLoadedRange(
+          loadedRangeRef.current,
+          payloadRange
+        );
+        dataBoundsRef.current = boundsFromPayload(payload);
         setData(payload);
+
         if (options?.fit) {
           setShouldFit(true);
+        } else if (options?.visibleRange) {
+          setPendingVisibleRange(options.visibleRange);
+          setPendingVisibleRangeVersion((value) => value + 1);
         }
       } catch (requestError) {
         if (controller.signal.aborted) return;
@@ -105,13 +175,32 @@ export default function HistoryTrendsPage() {
         return;
       }
 
+      if (!dataBoundsRef.current.hasData) {
+        return;
+      }
+
+      const visible = { fromMs: visibleFromMs, toMs: visibleToMs };
+      if (!shouldExpandLoadedRange(visible, loadedRangeRef.current)) {
+        return;
+      }
+
       if (debounceRef.current !== null) {
         window.clearTimeout(debounceRef.current);
       }
 
       debounceRef.current = window.setTimeout(() => {
         const padded = padVisibleRange(visibleFromMs, visibleToMs, 0.2);
-        void loadKline(padded.fromMs, padded.toMs);
+        const merged = mergeLoadedRange(loadedRangeRef.current, padded);
+        const clamped = clampRangeToDataBounds(merged.fromMs, merged.toMs, {
+          dataFromMs: dataBoundsRef.current.dataFromMs,
+          dataToMs: dataBoundsRef.current.dataToMs,
+        });
+
+        if (loadedRangeCovers(loadedRangeRef.current, clamped)) {
+          return;
+        }
+
+        void loadKline(clamped.fromMs, clamped.toMs, { visibleRange: visible });
       }, 300);
     },
     [loadKline]
@@ -123,23 +212,30 @@ export default function HistoryTrendsPage() {
 
   const handleResetView = useCallback(() => {
     const nextRange = defaultTrendRangeMs();
-    requestRangeRef.current = nextRange;
+    loadedRangeRef.current = emptyLoadedRange();
     skipNextZoomRef.current = true;
     setResetVersion((value) => value + 1);
     void loadKline(nextRange.fromMs, nextRange.toMs, { fit: true });
   }, [loadKline]);
 
   useEffect(() => {
+    loadedRangeRef.current = emptyLoadedRange();
+    dataBoundsRef.current = emptyDataBounds();
+
+    const defaultRange = defaultTrendRangeMs();
     const timer = window.setTimeout(() => {
       void loadKline(
-        requestRangeRef.current.fromMs,
-        requestRangeRef.current.toMs,
-        { fit: initialLoadRef.current }
+        defaultRange.fromMs,
+        defaultRange.toMs,
+        {
+          fit: initialLoadRef.current,
+          resetPendingRange: true,
+        }
       );
       initialLoadRef.current = false;
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [loadKline, reloadToken]);
+  }, [loadKline, reloadToken, query, rangeValues, bucketMode]);
 
   useEffect(
     () =>
@@ -240,11 +336,12 @@ export default function HistoryTrendsPage() {
         </CardHeader>
         <CardContent className="p-4 pt-0 sm:p-6 sm:pt-0">
           <InventoryKlineChart
-            ref={chartRef}
             mode="interactive"
             data={data}
             loading={loading}
             shouldFit={shouldFit}
+            pendingVisibleRange={pendingVisibleRange}
+            pendingVisibleRangeVersion={pendingVisibleRangeVersion}
             onVisibleRangeChange={({ fromMs, toMs }) =>
               scheduleZoomLoad(fromMs, toMs)
             }

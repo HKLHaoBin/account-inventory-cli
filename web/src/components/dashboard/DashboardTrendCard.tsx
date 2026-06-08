@@ -14,6 +14,7 @@ import {
 } from "@/lib/kline-time";
 import type { KlinePayload } from "@/types/account";
 
+// Compact preview only: no zoom refetch; full pan/zoom at /history/trends.
 export function DashboardTrendCard() {
   const abortRef = useRef<AbortController | null>(null);
   const [data, setData] = useState<KlinePayload | null>(null);

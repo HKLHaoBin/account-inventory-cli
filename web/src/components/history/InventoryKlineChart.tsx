@@ -2,6 +2,7 @@
 
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -33,6 +34,8 @@ type InventoryKlineChartProps = {
   seriesVisibility?: Partial<KlineSeriesVisibility>;
   onSeriesVisibilityChange?: (visibility: KlineSeriesVisibility) => void;
   onVisibleRangeChange?: (range: { fromMs: number; toMs: number }) => void;
+  pendingVisibleRange?: { fromMs: number; toMs: number } | null;
+  pendingVisibleRangeVersion?: number;
   shouldFit?: boolean;
   loading?: boolean;
   height?: number;
@@ -111,6 +114,8 @@ export const InventoryKlineChart = forwardRef<
     seriesVisibility,
     onSeriesVisibilityChange,
     onVisibleRangeChange,
+    pendingVisibleRange = null,
+    pendingVisibleRangeVersion = 0,
     shouldFit = false,
     loading = false,
     height,
@@ -171,22 +176,47 @@ export const InventoryKlineChart = forwardRef<
     }
   }, [seriesVisibility]);
 
-  function applyChartData(payload: KlinePayload | null, fit: boolean) {
-    const candles = payload?.candles ?? [];
-    const seriesData = buildSeriesData(candles);
-    candleSeriesRef.current?.setData(seriesData.candlestick);
-    inboundSeriesRef.current?.setData(seriesData.inbound);
-    outboundSeriesRef.current?.setData(seriesData.outbound);
-    netSeriesRef.current?.setData(seriesData.netChange);
-
-    if (fit) {
-      suppressRangeEventRef.current = true;
-      chartRef.current?.timeScale().fitContent();
+  const withSuppressedRangeEvents = useCallback((fn: () => void) => {
+    suppressRangeEventRef.current = true;
+    try {
+      fn();
+    } finally {
       window.setTimeout(() => {
         suppressRangeEventRef.current = false;
       }, 0);
     }
-  }
+  }, []);
+
+  const applyChartData = useCallback(
+    (
+      payload: KlinePayload | null,
+      fit: boolean,
+      restoreRange?: { fromMs: number; toMs: number } | null
+    ) => {
+      withSuppressedRangeEvents(() => {
+        const candles = payload?.candles ?? [];
+        const seriesData = buildSeriesData(candles);
+        candleSeriesRef.current?.setData(seriesData.candlestick);
+        inboundSeriesRef.current?.setData(seriesData.inbound);
+        outboundSeriesRef.current?.setData(seriesData.outbound);
+        netSeriesRef.current?.setData(seriesData.netChange);
+
+        if (fit) {
+          chartRef.current?.timeScale().fitContent();
+        } else if (restoreRange) {
+          chartRef.current?.timeScale().setVisibleRange({
+            from: Math.floor(
+              restoreRange.fromMs / 1000
+            ) as import("lightweight-charts").UTCTimestamp,
+            to: Math.floor(
+              restoreRange.toMs / 1000
+            ) as import("lightweight-charts").UTCTimestamp,
+          });
+        }
+      });
+    },
+    [withSuppressedRangeEvents]
+  );
 
   function applySeriesVisibility(next: KlineSeriesVisibility) {
     candleSeriesRef.current?.applyOptions({ visible: next.candlestick });
@@ -197,7 +227,9 @@ export const InventoryKlineChart = forwardRef<
 
   useImperativeHandle(ref, () => ({
     fitContent() {
-      chartRef.current?.timeScale().fitContent();
+      withSuppressedRangeEvents(() => {
+        chartRef.current?.timeScale().fitContent();
+      });
     },
     getVisibleRangeMs() {
       const range = chartRef.current?.timeScale().getVisibleRange();
@@ -207,7 +239,7 @@ export const InventoryKlineChart = forwardRef<
         toMs: parseTimeToMs(range.to as string | number),
       };
     },
-  }));
+  }), [withSuppressedRangeEvents]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -329,7 +361,7 @@ export const InventoryKlineChart = forwardRef<
       outboundSeriesRef.current = null;
       netSeriesRef.current = null;
     };
-  }, [chartHeight, mode, resolvedTheme]);
+  }, [applyChartData, chartHeight, mode, resolvedTheme]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -350,8 +382,16 @@ export const InventoryKlineChart = forwardRef<
 
   useEffect(() => {
     if (!chartRef.current) return;
-    applyChartData(data, shouldFit);
-  }, [data, shouldFit, chartReady]);
+    const restoreRange = shouldFit ? null : pendingVisibleRange;
+    applyChartData(data, shouldFit, restoreRange);
+  }, [
+    applyChartData,
+    chartReady,
+    data,
+    pendingVisibleRange,
+    pendingVisibleRangeVersion,
+    shouldFit,
+  ]);
 
   useEffect(() => {
     if (!chartRef.current) return;

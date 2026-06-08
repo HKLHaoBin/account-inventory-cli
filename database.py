@@ -1486,6 +1486,52 @@ def _append_kline_time_bounds(
     return f"WHERE {extra}", bound_params
 
 
+def get_kline_data_bounds(
+    *, query: str = "", range_tokens: list[str] | None = None
+) -> dict[str, Any]:
+    inbound_where, inbound_params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ir.inbound_at",
+        table_alias="ir",
+    )
+    outbound_where, outbound_params = _build_history_where(
+        query=query,
+        range_tokens=range_tokens,
+        timestamp_column="ob.outbound_at",
+        table_alias="ob",
+    )
+    sql = f"""
+        SELECT MIN(timestamp) AS min_ts, MAX(timestamp) AS max_ts
+        FROM (
+            SELECT ir.inbound_at AS timestamp
+            FROM inbound_records AS ir
+            LEFT JOIN account_notes AS an ON an.username = ir.username
+            {inbound_where}
+            UNION ALL
+            SELECT ob.outbound_at AS timestamp
+            FROM outbound_records AS ob
+            LEFT JOIN account_notes AS an ON an.username = ob.username
+            {outbound_where}
+        )
+    """
+    with _connect() as conn:
+        row = conn.execute(sql, [*inbound_params, *outbound_params]).fetchone()
+
+    min_ts = row["min_ts"]
+    max_ts = row["max_ts"]
+    if min_ts is None or max_ts is None:
+        return {"dataFrom": None, "dataTo": None, "hasData": False}
+
+    min_dt = _parse_kline_timestamp(str(min_ts))
+    max_dt = _parse_kline_timestamp(str(max_ts))
+    return {
+        "dataFrom": _format_kline_api_timestamp(min_dt),
+        "dataTo": _format_kline_api_timestamp(max_dt),
+        "hasData": True,
+    }
+
+
 def _fetch_kline_events(
     *,
     query: str = "",

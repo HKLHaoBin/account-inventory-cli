@@ -328,6 +328,9 @@ export interface KlinePayload {
   bucket: KlineBucket;
   from: string;
   to: string;
+  dataFrom: string | null;
+  dataTo: string | null;
+  hasData: boolean;
   candles: KlineCandle[];
   totals: KlineTotals;
 }
