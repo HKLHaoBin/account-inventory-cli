@@ -10,23 +10,25 @@ from fastapi.staticfiles import StaticFiles
 
 
 def frontend_file_for_path(web_out_dir: Path, path: str) -> Path:
-    web_index = web_out_dir / "index.html"
-    requested = (web_out_dir / path).resolve()
-    if requested.is_file() and web_out_dir in requested.parents:
+    web_root = web_out_dir.resolve()
+    web_index = web_root / "index.html"
+    requested = (web_root / path).resolve()
+    if requested.is_file() and web_root in requested.parents:
         return requested
 
-    html_route = (web_out_dir / f"{path}.html").resolve()
-    if html_route.is_file() and web_out_dir in html_route.parents:
+    html_route = (web_root / f"{path}.html").resolve()
+    if html_route.is_file() and web_root in html_route.parents:
         return html_route
 
-    route_index = (web_out_dir / path / "index.html").resolve()
-    if route_index.is_file() and web_out_dir in route_index.parents:
+    route_index = (web_root / path / "index.html").resolve()
+    if route_index.is_file() and web_root in route_index.parents:
         return route_index
 
     return web_index
 
 
 def mount_frontend(app: FastAPI, web_out_dir: Path) -> bool:
+    web_out_dir = web_out_dir.resolve()
     web_index = web_out_dir / "index.html"
     if not web_index.is_file():
         return False

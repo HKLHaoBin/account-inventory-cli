@@ -284,3 +284,24 @@ def test_cloud_packaged_frontend_static_path() -> None:
 
         resolved = frontend_static.frontend_file_for_path(out_dir, "")
         assert resolved == index.resolve()
+
+
+def test_frontend_file_for_path_relative_web_out_dir() -> None:
+    import os
+
+    import frontend_static
+
+    with tempfile.TemporaryDirectory() as tmp:
+        original = os.getcwd()
+        try:
+            os.chdir(tmp)
+            out_rel = Path("web/out")
+            out_rel.mkdir(parents=True)
+            index = out_rel / "index.html"
+            index.write_text("home", encoding="utf-8")
+
+            resolved = frontend_static.frontend_file_for_path(Path("web/out"), "")
+            assert resolved == (Path("web/out") / "index.html").resolve()
+            assert resolved.is_absolute()
+        finally:
+            os.chdir(original)

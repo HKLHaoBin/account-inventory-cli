@@ -3898,7 +3898,7 @@ def test_app_frontend_file_for_html_route() -> None:
 
         assert frontend_static.frontend_file_for_path(out_dir, "settings") == settings.resolve()
         assert frontend_static.frontend_file_for_path(out_dir, "history") == nested.resolve()
-        assert frontend_static.frontend_file_for_path(out_dir, "missing") == index
+        assert frontend_static.frontend_file_for_path(out_dir, "missing") == index.resolve()
 
 
 def test_app_open_browser_after_port_ready() -> None:
@@ -4195,6 +4195,10 @@ def run_all() -> tuple[int, list[str]]:
         (
             "cloud packaged frontend static path",
             test_cloud_app.test_cloud_packaged_frontend_static_path,
+        ),
+        (
+            "frontend file for path relative web out dir",
+            test_cloud_app.test_frontend_file_for_path_relative_web_out_dir,
         ),
     ]
     passed = 0
