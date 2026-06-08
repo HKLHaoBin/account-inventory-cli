@@ -20,12 +20,14 @@ import {
 } from "@/components/notes/note-overwrite-logic";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { useCategoryStatusFilter } from "@/hooks/use-category-status-filter";
-import { commitInbound, writeAppClipboardText } from "@/lib/api";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
+import { commitInbound } from "@/lib/api";
+import { runAppClipboardCopy } from "@/lib/clipboard-actions";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { useSeparatorRules } from "@/lib/use-separator-rules";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
-import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
+import { getClipboardWsUrl, clipboardLoadedStatus, isClipboardMessage } from "@/lib/ws";
 import { cn, formatDateTime, maskValue } from "@/lib/utils";
 import { SAMPLE_FORMAT } from "@/lib/mock-data";
 import type {
@@ -144,6 +146,8 @@ export default function InboundPage() {
   const [clipboardState, setClipboardState] = useState("连接剪贴板检测中");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [manualCopyText, setManualCopyText] = useState<string | null>(null);
+  const [manualCopyReason, setManualCopyReason] = useState<string | undefined>();
   const [batchNote, setBatchNote] = useState("");
   const { listRef, selected, matches, toggle } =
     useCategoryStatusFilter<InboundCountKey>();
@@ -183,9 +187,7 @@ export default function InboundPage() {
           }
           if (resultRowsRef.current.size > 0) resetForText(value.text);
           else appendText(value.text);
-          setClipboardState(
-            `已从剪贴板载入 ${value.validLines.length} 条，剔除 ${value.rejectedCount} 条`
-          );
+          setClipboardState(clipboardLoadedStatus(value.text));
         } catch {
           setClipboardState("剪贴板消息解析失败");
         }
@@ -310,7 +312,7 @@ export default function InboundPage() {
     }
   }
 
-  function copyFailures() {
+  async function copyFailures() {
     const failures = displayedRows
       .filter(
         (row) =>
@@ -321,7 +323,16 @@ export default function InboundPage() {
       )
       .map((row) => row.line)
       .join("\n");
-    if (failures) void writeAppClipboardText(failures);
+    if (!failures) return;
+    const outcome = await runAppClipboardCopy(failures);
+    if (outcome.ok) {
+      setManualCopyText(null);
+      setMessage("已复制失败行");
+      return;
+    }
+    setManualCopyText(outcome.manualCopyText);
+    setManualCopyReason(outcome.reason);
+    setMessage(outcome.reason ?? "复制失败");
   }
 
   return (
@@ -619,12 +630,20 @@ export default function InboundPage() {
           <Check className="h-4 w-4" />
           确认入库 ({approvedCount})
         </Button>
-        <Button variant="outline" onClick={copyFailures} disabled={displayedRows.length === 0}>
+        <Button variant="outline" onClick={() => void copyFailures()} disabled={displayedRows.length === 0}>
           <Copy className="h-4 w-4" />
           复制失败行
         </Button>
         {message && <span className="text-sm text-muted-foreground">{message}</span>}
       </div>
+
+      <ClipboardCopyFallback
+        visible={Boolean(manualCopyText)}
+        text={manualCopyText ?? ""}
+        reason={manualCopyReason}
+        onRetry={() => void copyFailures()}
+        onCopied={() => setManualCopyText(null)}
+      />
     </div>
   );
 }

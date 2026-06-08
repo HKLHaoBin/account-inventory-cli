@@ -26,6 +26,7 @@ import {
 } from "@/components/notes/note-overwrite-logic";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { DashboardTrendCard } from "@/components/dashboard/DashboardTrendCard";
 import { useCategoryStatusFilter } from "@/hooks/use-category-status-filter";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
@@ -38,7 +39,7 @@ import {
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
 import { shouldIgnoreInboundClipboardText } from "@/lib/outbound-clipboard-guard";
-import { isClipboardMessage, getClipboardWsUrl } from "@/lib/ws";
+import { clipboardLoadedStatus, getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { useSeparatorRules } from "@/lib/use-separator-rules";
 import { cn, formatDateTime, formatRelativeTime, maskValue } from "@/lib/utils";
@@ -403,6 +404,8 @@ export default function DashboardPage() {
     copy: copyFifoClipboard,
     copying: fifoCopying,
     copied: fifoCopied,
+    copyFailed: fifoCopyFailed,
+    acknowledgeCopySuccess: acknowledgeFifoCopySuccess,
   } = useLastOutboundClipboard();
 
   const replaceInboundText = useCallback((value: string) => {
@@ -521,9 +524,7 @@ export default function DashboardPage() {
           } else {
             appendInboundText(value.text);
           }
-          setClipboardState(
-            `已从剪贴板载入 ${value.validLines.length} 条，剔除 ${value.rejectedCount} 条`
-          );
+          setClipboardState(clipboardLoadedStatus(value.text));
         } catch {
           setClipboardState("剪贴板消息解析失败");
         }
@@ -741,7 +742,7 @@ export default function DashboardPage() {
       setFifoMessage(
         copiedOk
           ? `已出库 ${payload.quantity} 条并复制到剪贴板`
-          : `已出库 ${payload.quantity} 条，复制失败请点重新复制`
+          : `已出库 ${payload.quantity} 条，自动复制失败，请手动复制`
       );
       await loadDashboard();
     } catch (error) {
@@ -774,7 +775,7 @@ export default function DashboardPage() {
     setFifoMessage("");
     const ok = await copyFifoClipboard();
     if (!ok && fifoClipboardText) {
-      setFifoMessage("复制到剪贴板失败，请重试");
+      setFifoMessage("自动复制失败，请使用下方手动复制");
     }
   }
 
@@ -1374,6 +1375,15 @@ export default function DashboardPage() {
               >
                 {fifoMessage}
               </p>
+            )}
+
+            {fifoCopyFailed && fifoClipboardText && (
+              <ClipboardCopyFallback
+                visible
+                text={fifoClipboardText}
+                onRetry={handleFifoCopy}
+                onCopied={acknowledgeFifoCopySuccess}
+              />
             )}
 
             <div className="grid gap-2 sm:grid-cols-3">

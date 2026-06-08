@@ -21,6 +21,7 @@ import cli
 import clipboard
 import console_input
 import database as db
+import test_cloud_app
 from batch import (
     InboundFailure,
     InboundPending,
@@ -3882,6 +3883,7 @@ def test_app_browser_url_ipv6() -> None:
 
 def test_app_frontend_file_for_html_route() -> None:
     import app as web_app
+    import frontend_static
 
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = Path(tmp) / "out"
@@ -3894,14 +3896,9 @@ def test_app_frontend_file_for_html_route() -> None:
         nested.parent.mkdir()
         nested.write_text("history", encoding="utf-8")
 
-        with mock.patch.object(web_app, "WEB_OUT_DIR", out_dir), mock.patch.object(
-            web_app,
-            "WEB_INDEX",
-            index,
-        ):
-            assert web_app.frontend_file_for_path("settings") == settings.resolve()
-            assert web_app.frontend_file_for_path("history") == nested.resolve()
-            assert web_app.frontend_file_for_path("missing") == index
+        assert frontend_static.frontend_file_for_path(out_dir, "settings") == settings.resolve()
+        assert frontend_static.frontend_file_for_path(out_dir, "history") == nested.resolve()
+        assert frontend_static.frontend_file_for_path(out_dir, "missing") == index
 
 
 def test_app_open_browser_after_port_ready() -> None:
@@ -4153,6 +4150,52 @@ def run_all() -> tuple[int, list[str]]:
         ("app frontend html route", test_app_frontend_file_for_html_route),
         ("app open browser after port ready", test_app_open_browser_after_port_ready),
         ("app browser open failure", test_app_browser_open_failure_does_not_raise),
+        (
+            "cloud import no local database",
+            test_cloud_app.test_import_cloud_app_does_not_create_local_database,
+        ),
+        ("cloud config save and load", test_cloud_app.test_cloud_config_save_and_load),
+        (
+            "cloud proxy requires configuration",
+            test_cloud_app.test_cloud_proxy_requires_configuration,
+        ),
+        ("cloud proxy forwards request", test_cloud_app.test_cloud_proxy_forwards_request),
+        (
+            "cloud clipboard ignore local",
+            test_cloud_app.test_cloud_clipboard_ignore_is_local,
+        ),
+        (
+            "cloud local config endpoints",
+            test_cloud_app.test_cloud_local_config_endpoints,
+        ),
+        (
+            "cloud local config test success",
+            test_cloud_app.test_cloud_local_config_test_success,
+        ),
+        (
+            "cloud local config test requires configuration",
+            test_cloud_app.test_cloud_local_config_test_requires_configuration,
+        ),
+        (
+            "cloud config rejects non http url",
+            test_cloud_app.test_cloud_config_rejects_non_http_url,
+        ),
+        (
+            "cloud load config ignores invalid stored url",
+            test_cloud_app.test_cloud_load_config_ignores_invalid_stored_url,
+        ),
+        (
+            "cloud local config with invalid stored url",
+            test_cloud_app.test_cloud_local_config_with_invalid_stored_url,
+        ),
+        (
+            "cloud proxy strips encoding headers",
+            test_cloud_app.test_cloud_proxy_strips_encoding_headers,
+        ),
+        (
+            "cloud packaged frontend static path",
+            test_cloud_app.test_cloud_packaged_frontend_static_path,
+        ),
     ]
     passed = 0
     for name, fn in tests:

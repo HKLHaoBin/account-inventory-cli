@@ -10,9 +10,13 @@ export function getClipboardWsUrl(): string {
 export function isClipboardMessage(value: unknown): value is ClipboardMessage {
   if (!value || typeof value !== "object") return false;
   const message = value as Partial<ClipboardMessage>;
-  return (
-    message.source === "clipboard" &&
-    typeof message.text === "string" &&
-    Array.isArray(message.validLines)
-  );
+  return message.source === "clipboard" && typeof message.text === "string";
+}
+
+export function clipboardLoadedStatus(text: string): string {
+  const lineCount = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean).length;
+  return `已从剪贴板载入 ${lineCount} 行`;
 }

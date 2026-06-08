@@ -33,6 +33,8 @@ import {
   clearOutboundClipboardText,
   rememberOutboundClipboardText,
 } from "@/lib/outbound-clipboard-guard";
+import { readHttpErrorDetail } from "@/lib/http-error";
+import { ClipboardCopyError, copyToClipboard } from "@/lib/clipboard";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -91,8 +93,11 @@ async function requestJson<T>(
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `请求失败：${response.status}`);
+    const detail = await readHttpErrorDetail(
+      response,
+      response.status === 428 ? "请先配置数据库服务地址" : undefined
+    );
+    throw new Error(detail);
   }
 
   return response.json() as Promise<T>;
@@ -452,7 +457,10 @@ export function triggerUpdate(token: string): Promise<UpdateStatusPayload> {
 }
 
 export async function writeAppClipboardText(text: string): Promise<void> {
-  await navigator.clipboard.writeText(text);
+  const result = await copyToClipboard(text);
+  if (!result.ok) {
+    throw new ClipboardCopyError(result.text, result.reason);
+  }
   try {
     await ignoreClipboardText(text);
   } catch {

@@ -8,8 +8,8 @@ import {
   commitReInboundFromHistory,
   DEFAULT_PAGE_SIZE,
   fetchOutboundHistory,
-  writeAppClipboardText,
 } from "@/lib/api";
+import { runHistoryQuickAction } from "@/lib/clipboard-actions";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import type { DateRangeFilter, HistoryRecord, OutboundRecord } from "@/types/account";
 
@@ -104,9 +104,10 @@ export default function OutboundHistoryPage() {
 
   const handleReInbound = useCallback(
     async (record: OutboundRecord | HistoryRecord) => {
-      const payload = await commitReInboundFromHistory(record);
-      await writeAppClipboardText(payload.clipboardText);
-      setReloadToken((value) => value + 1);
+      await runHistoryQuickAction(
+        () => commitReInboundFromHistory(record),
+        () => setReloadToken((value) => value + 1)
+      );
     },
     []
   );

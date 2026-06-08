@@ -138,12 +138,57 @@ jobs:
             dist/updater.exe
           if-no-files-found: error
 
+  build-cloud-exe:
+    runs-on: windows-latest
+    needs:
+      - version
+      - build-frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply release version
+        shell: bash
+        run: echo "${{ needs.version.outputs.version }}" > VERSION
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-out
+          path: web/out
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build cloud Windows EXE
+        run: pyinstaller --noconfirm account-inventory-cloud.spec
+
+      - name: Verify cloud artifact
+        shell: bash
+        run: |
+          test -f web/out/index.html
+          test -f dist/account-inventory-cloud.exe
+          python -c "from pathlib import Path; import frontend_static; out=Path('web/out'); assert frontend_static.frontend_file_for_path(out, '') == (out / 'index.html').resolve()"
+
+      - name: Upload cloud artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-exe
+          path: dist/account-inventory-cloud.exe
+          if-no-files-found: error
+
   package-release:
     runs-on: windows-latest
     needs:
       - version
       - build-frontend
       - build-backend
+      - build-cloud-exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -168,6 +213,12 @@ jobs:
           name: version-file
           path: release-package
 
+      - name: Download cloud artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cloud-exe
+          path: release-assets
+
       - name: Add run helper
         shell: pwsh
         run: |
@@ -191,6 +242,11 @@ jobs:
             "下载后推荐双击 start-web.bat，或运行 account-inventory-web.exe。"
             "用户也可以手动运行 updater.exe 执行一次性更新；只有通过软件启动的自动更新或显式 --watch 参数才会进入持续检测。"
             ""
+            "如需连接已有云端数据库服务，可单独下载："
+            "- account-inventory-cloud.exe"
+            ""
+            "该云端模式客户端内嵌前端，不写本地账号 SQLite；启动后在设置页填写云端 API 根地址即可。"
+            ""
             "需要固定版本归档时下载："
             "- account-inventory-web-$version-windows.zip"
             ""
@@ -210,6 +266,11 @@ jobs:
             "- account-inventory-web-windows.zip.sha256"
             "  - account-inventory-web-windows.zip 的 SHA256 校验文件。"
             "  - 用于确认下载文件没有损坏或被替换。"
+            ""
+            "- account-inventory-cloud.exe"
+            "  - 云端模式单文件客户端，内嵌前端静态页面。"
+            "  - 仅提供本地剪贴板监听、ignore 回写和 `/api/*` 代理，不创建或写入本地账号 SQLite。"
+            "  - 启动后在设置页填写云端后端 API 根地址，例如 https://example.com。"
             ""
             "- Source code (zip)"
             "  - GitHub 自动生成的源码压缩包。"
@@ -293,6 +354,7 @@ jobs:
             account-inventory-web-${{ needs.version.outputs.version }}-windows.zip
             account-inventory-web-windows.zip
             account-inventory-web-windows.zip.sha256
+            release-assets/account-inventory-cloud.exe
             README.txt
           generate_release_notes: true
           overwrite_files: true

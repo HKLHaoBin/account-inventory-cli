@@ -17,14 +17,16 @@ import {
   mergeCommitResultRowsIntoMap,
 } from "@/components/notes/note-overwrite-logic";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
 import { useCategoryStatusFilter } from "@/hooks/use-category-status-filter";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
-import { commitOutboundPaste, writeAppClipboardText } from "@/lib/api";
+import { commitOutboundPaste } from "@/lib/api";
+import { runAppClipboardCopy } from "@/lib/clipboard-actions";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { useSeparatorRules } from "@/lib/use-separator-rules";
-import { getClipboardWsUrl, isClipboardMessage } from "@/lib/ws";
+import { getClipboardWsUrl, clipboardLoadedStatus, isClipboardMessage } from "@/lib/ws";
 import { cn, maskValue } from "@/lib/utils";
 import type {
   OutboundPasteCategory,
@@ -107,6 +109,8 @@ export default function OutboundPastePage() {
   const [clipboardState, setClipboardState] = useState("连接剪贴板检测中");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [manualCopyText, setManualCopyText] = useState<string | null>(null);
+  const [manualCopyReason, setManualCopyReason] = useState<string | undefined>();
   const [batchNote, setBatchNote] = useState("");
   const { listRef, selected, matches, toggle } =
     useCategoryStatusFilter<OutboundPasteCategory>();
@@ -117,6 +121,8 @@ export default function OutboundPastePage() {
     copy,
     copying,
     copied,
+    copyFailed,
+    acknowledgeCopySuccess,
   } = useLastOutboundClipboard();
 
   const resetForText = useCallback((value: string) => {
@@ -150,9 +156,7 @@ export default function OutboundPastePage() {
           if (!isClipboardMessage(value)) return;
           if (resultRowsRef.current.size > 0) resetForText(value.text);
           else appendText(value.text);
-          setClipboardState(
-            `已从剪贴板载入 ${value.validLines.length} 条，剔除 ${value.rejectedCount} 条`
-          );
+          setClipboardState(clipboardLoadedStatus(value.text));
         } catch {
           setClipboardState("剪贴板消息解析失败");
         }
@@ -271,7 +275,7 @@ export default function OutboundPastePage() {
       setMessage(
         copiedOk
           ? `${summary}，已复制到剪贴板`
-          : `${summary}，复制失败请点重新复制`
+          : `${summary}，自动复制失败，请手动复制`
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "出库提交失败");
@@ -284,16 +288,25 @@ export default function OutboundPastePage() {
     setMessage("");
     const ok = await copy();
     if (!ok && clipboardText) {
-      setMessage("复制到剪贴板失败，请重试");
+      setMessage("自动复制失败，请使用下方手动复制");
     }
   }
 
-  function copyFailures() {
+  async function copyFailures() {
     const failures = displayedRows
       .filter((row) => row.status === "error" || row.category === "invalid")
       .map((row) => row.line)
       .join("\n");
-    if (failures) void writeAppClipboardText(failures);
+    if (!failures) return;
+    const outcome = await runAppClipboardCopy(failures);
+    if (outcome.ok) {
+      setManualCopyText(null);
+      setMessage("已复制失败行");
+      return;
+    }
+    setManualCopyText(outcome.manualCopyText);
+    setManualCopyReason(outcome.reason);
+    setMessage(outcome.reason ?? "复制失败");
   }
 
   return (
@@ -546,12 +559,29 @@ export default function OutboundPastePage() {
           onCopy={handleCopyOutbound}
           disabled={busy}
         />
-        <Button variant="outline" onClick={copyFailures} disabled={displayedRows.length === 0}>
+        <Button variant="outline" onClick={() => void copyFailures()} disabled={displayedRows.length === 0}>
           <Copy className="h-4 w-4" />
           复制失败行
         </Button>
         {message && <span className="text-sm text-muted-foreground">{message}</span>}
       </div>
+
+      {clipboardText && copyFailed && (
+        <ClipboardCopyFallback
+          visible
+          text={clipboardText}
+          onRetry={handleCopyOutbound}
+          onCopied={acknowledgeCopySuccess}
+        />
+      )}
+
+      <ClipboardCopyFallback
+        visible={Boolean(manualCopyText)}
+        text={manualCopyText ?? ""}
+        reason={manualCopyReason}
+        onRetry={() => void copyFailures()}
+        onCopied={() => setManualCopyText(null)}
+      />
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
   Copy,
   Database,
   DownloadCloud,
+  Globe,
   Keyboard,
   Monitor,
   Moon,
@@ -36,6 +37,11 @@ import {
   updateSeparatorRule,
 } from "@/lib/api";
 import { emitDatabaseChanged, subscribeDatabaseChanged } from "@/lib/database-events";
+import {
+  fetchLocalConfig,
+  saveLocalConfig,
+  testLocalConfig,
+} from "@/lib/local-config";
 import {
   emitSeparatorRulesChanged,
   subscribeSeparatorRulesChanged,
@@ -107,6 +113,13 @@ export default function SettingsPage() {
   const [addingRule, setAddingRule] = useState(false);
   const [updatingRuleId, setUpdatingRuleId] = useState<string | null>(null);
   const [deletingRuleId, setDeletingRuleId] = useState<string | null>(null);
+  const [isCloudMode, setIsCloudMode] = useState<boolean | null>(null);
+  const [cloudApiBaseUrl, setCloudApiBaseUrl] = useState("");
+  const [cloudConfigured, setCloudConfigured] = useState(false);
+  const [cloudConfigError, setCloudConfigError] = useState("");
+  const [cloudConfigMessage, setCloudConfigMessage] = useState("");
+  const [savingCloudConfig, setSavingCloudConfig] = useState(false);
+  const [testingCloudConfig, setTestingCloudConfig] = useState(false);
 
   const refreshUpdateStatus = useCallback(async () => {
     try {
@@ -141,9 +154,29 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const refreshLocalConfig = useCallback(async () => {
+    try {
+      const payload = await fetchLocalConfig();
+      if (!payload) {
+        setIsCloudMode(false);
+        return;
+      }
+      setIsCloudMode(true);
+      setCloudApiBaseUrl(payload.cloudApiBaseUrl ?? "");
+      setCloudConfigured(payload.configured);
+      setCloudConfigError("");
+    } catch (error) {
+      setIsCloudMode(false);
+      setCloudConfigError(
+        error instanceof Error ? error.message : "本地配置读取失败"
+      );
+    }
+  }, []);
+
   useEffect(() => {
     const mountTimer = window.setTimeout(() => setMounted(true), 0);
     const statusTimer = window.setTimeout(() => {
+      void refreshLocalConfig();
       void refreshUpdateStatus();
       void refreshDatabase();
       void refreshSeparatorRules();
@@ -152,7 +185,7 @@ export default function SettingsPage() {
       window.clearTimeout(mountTimer);
       window.clearTimeout(statusTimer);
     };
-  }, [refreshDatabase, refreshSeparatorRules, refreshUpdateStatus]);
+  }, [refreshDatabase, refreshLocalConfig, refreshSeparatorRules, refreshUpdateStatus]);
 
   useEffect(
     () =>
@@ -330,6 +363,51 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleSaveCloudConfig() {
+    const url = cloudApiBaseUrl.trim();
+    if (!url) {
+      setCloudConfigError("数据库服务地址不能为空");
+      setCloudConfigMessage("");
+      return;
+    }
+    setSavingCloudConfig(true);
+    try {
+      const payload = await saveLocalConfig(url);
+      setCloudApiBaseUrl(payload.cloudApiBaseUrl ?? "");
+      setCloudConfigured(payload.configured);
+      setCloudConfigError("");
+      setCloudConfigMessage("服务地址已保存");
+    } catch (error) {
+      setCloudConfigMessage("");
+      setCloudConfigError(
+        error instanceof Error ? error.message : "保存服务地址失败"
+      );
+    } finally {
+      setSavingCloudConfig(false);
+    }
+  }
+
+  async function handleTestCloudConfig() {
+    setTestingCloudConfig(true);
+    setCloudConfigMessage("");
+    try {
+      if (cloudApiBaseUrl.trim()) {
+        await saveLocalConfig(cloudApiBaseUrl.trim());
+      }
+      await testLocalConfig();
+      setCloudConfigured(true);
+      setCloudConfigError("");
+      setCloudConfigMessage("连接测试成功");
+    } catch (error) {
+      setCloudConfigMessage("");
+      setCloudConfigError(
+        error instanceof Error ? error.message : "连接测试失败"
+      );
+    } finally {
+      setTestingCloudConfig(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
@@ -339,6 +417,7 @@ export default function SettingsPage() {
         </p>
       </div>
 
+      {isCloudMode !== true && (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -447,6 +526,84 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+      )}
+
+      {isCloudMode && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Globe className="h-4 w-4" />
+              数据库服务地址
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 rounded-xl border border-border bg-muted/30 p-4 text-sm sm:grid-cols-2">
+              <div>
+                <p className="text-xs text-muted-foreground">当前状态</p>
+                <p
+                  className={`mt-1 flex items-center gap-1.5 ${
+                    cloudConfigured ? "text-emerald-600" : "text-amber-600"
+                  }`}
+                >
+                  {cloudConfigured ? (
+                    <CheckCircle2 className="h-4 w-4" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4" />
+                  )}
+                  {cloudConfigured ? "已配置" : "未配置"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">说明</p>
+                <p className="mt-1 text-foreground">
+                  填写云端后端 API 根地址，业务请求仍走 `/api/...`。
+                </p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">服务地址</label>
+              <Input
+                value={cloudApiBaseUrl}
+                onChange={(event) => setCloudApiBaseUrl(event.target.value)}
+                placeholder="https://example.com"
+                autoComplete="off"
+              />
+            </div>
+            {cloudConfigError && (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                {cloudConfigError}
+              </div>
+            )}
+            {cloudConfigMessage && (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700">
+                {cloudConfigMessage}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                onClick={() => void handleSaveCloudConfig()}
+                disabled={savingCloudConfig || testingCloudConfig}
+              >
+                保存地址
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleTestCloudConfig()}
+                disabled={savingCloudConfig || testingCloudConfig}
+              >
+                <RefreshCw
+                  className={
+                    testingCloudConfig ? "h-4 w-4 animate-spin" : "h-4 w-4"
+                  }
+                />
+                测试连接
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

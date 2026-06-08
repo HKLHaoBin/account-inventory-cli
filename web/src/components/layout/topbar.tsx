@@ -18,6 +18,7 @@ import {
   searchAccounts,
 } from "@/lib/api";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import { shouldResetTopbarNoteDraft } from "@/components/notes/note-overwrite-logic";
@@ -54,7 +55,6 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
   const [outboundNote, setOutboundNote] = useState("");
   const [outboundOverwriteNote, setOutboundOverwriteNote] = useState(false);
   const [outboundSuccess, setOutboundSuccess] = useState(false);
-  const [outboundCopyError, setOutboundCopyError] = useState("");
   const {
     clipboardText,
     remember,
@@ -62,6 +62,8 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     copy,
     copying,
     copied,
+    copyFailed,
+    acknowledgeCopySuccess,
   } = useLastOutboundClipboard();
 
   useEffect(() => {
@@ -112,7 +114,6 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
         clearOutboundNoteDraft();
         clearClipboard();
         setOutboundSuccess(false);
-        setOutboundCopyError("");
         setOpen(false);
         inputRef.current?.blur();
       }
@@ -124,7 +125,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onQuickOutbound]);
+  }, [clearClipboard, onQuickOutbound]);
 
   const inventoryResults = results.filter((r) => r.source === "inventory");
   const historyResults = results.filter((r) => r.source === "history");
@@ -155,7 +156,6 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     clearOutboundNoteDraft();
     clearClipboard();
     setOutboundSuccess(false);
-    setOutboundCopyError("");
     setOpen(false);
   }
 
@@ -165,7 +165,6 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
 
     setOutboundBusy(true);
     setSearchError("");
-    setOutboundCopyError("");
     try {
       const payload = await outboundByUsername(hit.account.username, {
         note: outboundNote.trim() || undefined,
@@ -173,7 +172,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
       });
       const text = payload.clipboardText ?? "";
       remember(text);
-      const copiedOk = text ? await copy(text) : true;
+      if (text) await copy(text);
       const q = query.trim();
       if (q) {
         const updated = await searchAccounts(q, {
@@ -187,9 +186,6 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
       }
       clearOutboundNoteDraft();
       setOutboundSuccess(true);
-      if (!copiedOk) {
-        setOutboundCopyError("已出库，复制失败请点重新复制");
-      }
     } catch (error) {
       setSearchError(
         error instanceof Error ? error.message : "出库失败"
@@ -200,11 +196,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
   };
 
   async function handleCopyOutbound() {
-    setOutboundCopyError("");
-    const ok = await copy();
-    if (!ok && clipboardText) {
-      setOutboundCopyError("复制到剪贴板失败，请重试");
-    }
+    await copy();
   }
 
   return (
@@ -229,7 +221,6 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
               clearOutboundNoteDraft();
               clearClipboard();
               setOutboundSuccess(false);
-              setOutboundCopyError("");
             } else {
               setResults([]);
               setLoading(true);
@@ -252,7 +243,6 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
               clearOutboundNoteDraft();
               clearClipboard();
               setOutboundSuccess(false);
-              setOutboundCopyError("");
               setOpen(false);
             }}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
@@ -364,13 +354,8 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                 {outboundSuccess && (
                   <div className="mt-2 space-y-2 border-t border-border bg-emerald-50 p-2 dark:bg-emerald-950/30">
                     <p className="text-center text-sm font-medium text-emerald-700 dark:text-emerald-300">
-                      已出库
+                      {copyFailed ? "已出库，自动复制失败" : "已出库"}
                     </p>
-                    {outboundCopyError && (
-                      <p className="text-center text-sm text-red-600">
-                        {outboundCopyError}
-                      </p>
-                    )}
                     <div className="flex gap-2">
                       <OutboundCopyButton
                         className="flex-1"
@@ -388,6 +373,12 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                         完成
                       </Button>
                     </div>
+                    <ClipboardCopyFallback
+                      visible={copyFailed}
+                      text={clipboardText}
+                      onRetry={handleCopyOutbound}
+                      onCopied={acknowledgeCopySuccess}
+                    />
                   </div>
                 )}
                 <button

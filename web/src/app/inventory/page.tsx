@@ -16,14 +16,15 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
 import { Pagination } from "@/components/ui/pagination";
-import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { OutboundCopyPanel } from "@/components/clipboard/outbound-copy-panel";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
   DEFAULT_PAGE_SIZE,
   fetchInventory,
   outboundByUsername,
-  writeAppClipboardText,
 } from "@/lib/api";
+import { runAppClipboardCopy } from "@/lib/clipboard-actions";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import {
   cn,
@@ -54,7 +55,8 @@ export default function InventoryPage() {
   const [outboundRowErrors, setOutboundRowErrors] = useState<
     Record<string, string>
   >({});
-  const [lastOutboundCopyFailed, setLastOutboundCopyFailed] = useState(false);
+  const [manualCopyText, setManualCopyText] = useState<string | null>(null);
+  const [manualCopyReason, setManualCopyReason] = useState<string | undefined>();
   const {
     clipboardText,
     remember,
@@ -62,6 +64,8 @@ export default function InventoryPage() {
     copy,
     copying,
     copied,
+    copyFailed,
+    acknowledgeCopySuccess,
   } = useLastOutboundClipboard();
 
   const showFifoBadge =
@@ -125,7 +129,7 @@ export default function InventoryPage() {
     () =>
       subscribeDatabaseChanged(() => {
         clear();
-        setLastOutboundCopyFailed(false);
+        setManualCopyText(null);
         setOutboundRowErrors({});
         setOutboundUsername(null);
         setSelected(new Set());
@@ -174,16 +178,21 @@ export default function InventoryPage() {
     });
   };
 
-  const copyAccount = (a: Account) => {
-    void writeAppClipboardText(
-      formatAccountLine(
-        a.username,
-        a.password,
-        a.email,
-        a.emailPassword,
-        a.url
-      )
+  const copyAccount = async (a: Account) => {
+    const text = formatAccountLine(
+      a.username,
+      a.password,
+      a.email,
+      a.emailPassword,
+      a.url
     );
+    const outcome = await runAppClipboardCopy(text);
+    if (outcome.ok) {
+      setManualCopyText(null);
+      return;
+    }
+    setManualCopyText(outcome.manualCopyText);
+    setManualCopyReason(outcome.reason);
   };
 
   const outboundAccount = async (account: Account) => {
@@ -194,13 +203,11 @@ export default function InventoryPage() {
       delete next[account.id];
       return next;
     });
-    setLastOutboundCopyFailed(false);
     try {
       const payload = await outboundByUsername(account.username);
       const text = payload.clipboardText ?? "";
       remember(text);
-      const copiedOk = text ? await copy(text) : true;
-      setLastOutboundCopyFailed(!copiedOk);
+      if (text) await copy(text);
       await loadInventory();
     } catch (requestError) {
       setOutboundRowErrors((current) => ({
@@ -214,11 +221,29 @@ export default function InventoryPage() {
   };
 
   async function handleCopyOutbound() {
-    setLastOutboundCopyFailed(false);
-    const ok = await copy();
-    if (!ok && clipboardText) {
-      setLastOutboundCopyFailed(true);
+    await copy();
+  }
+
+  async function handleCopySelected() {
+    const lines = records
+      .filter((a) => selected.has(a.id))
+      .map((a) =>
+        formatAccountLine(
+          a.username,
+          a.password,
+          a.email,
+          a.emailPassword,
+          a.url
+        )
+      )
+      .join("\n");
+    const outcome = await runAppClipboardCopy(lines);
+    if (outcome.ok) {
+      setManualCopyText(null);
+      return;
     }
+    setManualCopyText(outcome.manualCopyText);
+    setManualCopyReason(outcome.reason);
   }
 
   const rowPadding = density === "compact" ? "py-2" : "py-3.5";
@@ -318,21 +343,7 @@ export default function InventoryPage() {
           variant="secondary"
           size="sm"
           disabled={visibleSelectedCount === 0}
-          onClick={() => {
-            const lines = records
-              .filter((a) => selected.has(a.id))
-              .map((a) =>
-                formatAccountLine(
-                  a.username,
-                  a.password,
-                  a.email,
-                  a.emailPassword,
-                  a.url
-                )
-              )
-              .join("\n");
-            void writeAppClipboardText(lines);
-          }}
+          onClick={() => void handleCopySelected()}
         >
           <Copy className="h-4 w-4" />
           复制选中 ({visibleSelectedCount})
@@ -349,23 +360,22 @@ export default function InventoryPage() {
       </div>
 
       {clipboardText && (
-        <Card className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30">
-          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
-            <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
-              {lastOutboundCopyFailed
-                ? "已出库，复制失败可点重新复制"
-                : "账号已出库，可重新复制"}
-            </p>
-            <OutboundCopyButton
-              size="sm"
-              clipboardText={clipboardText}
-              copying={copying}
-              copied={copied}
-              onCopy={handleCopyOutbound}
-            />
-          </CardContent>
-        </Card>
+        <OutboundCopyPanel
+          clipboardText={clipboardText}
+          copying={copying}
+          copied={copied}
+          copyFailed={copyFailed}
+          onCopy={handleCopyOutbound}
+          onManualCopySuccess={acknowledgeCopySuccess}
+        />
       )}
+
+      <ClipboardCopyFallback
+        visible={Boolean(manualCopyText)}
+        text={manualCopyText ?? ""}
+        reason={manualCopyReason}
+        onCopied={() => setManualCopyText(null)}
+      />
 
       {records.length === 0 ? (
         <Card>

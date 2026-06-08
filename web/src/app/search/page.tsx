@@ -9,14 +9,15 @@ import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
 import { Pagination } from "@/components/ui/pagination";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
-import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { OutboundCopyPanel } from "@/components/clipboard/outbound-copy-panel";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import {
   DEFAULT_PAGE_SIZE,
   outboundByUsername,
   searchAccounts,
-  writeAppClipboardText,
 } from "@/lib/api";
+import { runAppClipboardCopy } from "@/lib/clipboard-actions";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
 import type { SearchResult } from "@/types/account";
@@ -58,8 +59,11 @@ function SearchContent() {
     copy,
     copying,
     copied,
+    copyFailed,
+    acknowledgeCopySuccess,
   } = useLastOutboundClipboard();
-  const [copyError, setCopyError] = useState("");
+  const [manualCopyText, setManualCopyText] = useState<string | null>(null);
+  const [manualCopyReason, setManualCopyReason] = useState<string | undefined>();
   const [reloadToken, setReloadToken] = useState(0);
   const lastQueryRef = useRef(query);
 
@@ -149,9 +153,9 @@ function SearchContent() {
     []
   );
 
-  const copyResult = (r: SearchResult) => {
+  const copyResult = async (r: SearchResult) => {
     const a = r.account;
-    void writeAppClipboardText(
+    const outcome = await runAppClipboardCopy(
       formatAccountLine(
         a.username,
         a.password,
@@ -160,6 +164,12 @@ function SearchContent() {
         a.url
       )
     );
+    if (outcome.ok) {
+      setManualCopyText(null);
+      return;
+    }
+    setManualCopyText(outcome.manualCopyText);
+    setManualCopyReason(outcome.reason);
   };
 
   const outboundResult = async (r: SearchResult) => {
@@ -168,7 +178,6 @@ function SearchContent() {
     const draft = outboundNotes[username] ?? { note: "", overwriteNote: false };
     setOutboundUsername(username);
     setError("");
-    setCopyError("");
     try {
       const payload = await outboundByUsername(username, {
         note: draft.note.trim() || undefined,
@@ -176,10 +185,7 @@ function SearchContent() {
       });
       const text = payload.clipboardText ?? "";
       remember(text);
-      const copiedOk = text ? await copy(text) : true;
-      if (!copiedOk) {
-        setCopyError("已出库，复制失败请点重新复制");
-      }
+      if (text) await copy(text);
       setOutboundNotes((current) => {
         const next = { ...current };
         delete next[username];
@@ -196,11 +202,7 @@ function SearchContent() {
   };
 
   async function handleCopyOutbound() {
-    setCopyError("");
-    const ok = await copy();
-    if (!ok && clipboardText) {
-      setCopyError("复制到剪贴板失败，请重试");
-    }
+    await copy();
   }
 
   function updateOutboundNote(
@@ -268,26 +270,22 @@ function SearchContent() {
           )}
 
           {clipboardText && (
-            <Card className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30">
-              <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
-                <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
-                  账号已出库，复制失败可点重新复制
-                </p>
-                <div className="flex items-center gap-2">
-                  {copyError && (
-                    <span className="text-sm text-red-600">{copyError}</span>
-                  )}
-                  <OutboundCopyButton
-                    size="sm"
-                    clipboardText={clipboardText}
-                    copying={copying}
-                    copied={copied}
-                    onCopy={handleCopyOutbound}
-                  />
-                </div>
-              </CardContent>
-            </Card>
+            <OutboundCopyPanel
+              clipboardText={clipboardText}
+              copying={copying}
+              copied={copied}
+              copyFailed={copyFailed}
+              onCopy={handleCopyOutbound}
+              onManualCopySuccess={acknowledgeCopySuccess}
+            />
           )}
+
+          <ClipboardCopyFallback
+            visible={Boolean(manualCopyText)}
+            text={manualCopyText ?? ""}
+            reason={manualCopyReason}
+            onCopied={() => setManualCopyText(null)}
+          />
 
           {loading ? (
             <Card>

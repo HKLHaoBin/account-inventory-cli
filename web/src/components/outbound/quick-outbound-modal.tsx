@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import { commitFifo, previewFifo } from "@/lib/api";
 import { downloadTextFile } from "@/lib/download";
@@ -40,6 +41,8 @@ export function QuickOutboundModal({
     copy,
     copying,
     copied,
+    copyFailed,
+    acknowledgeCopySuccess,
   } = useLastOutboundClipboard();
 
   const clamped = Math.min(Math.max(quantity, 0), max);
@@ -132,7 +135,7 @@ export function QuickOutboundModal({
       setSuccessMessage(
         copiedOk
           ? `已出库 ${payload.quantity} 条并复制到剪贴板`
-          : `已出库 ${payload.quantity} 条，复制失败请点重新复制`
+          : `已出库 ${payload.quantity} 条，自动复制失败，请手动复制`
       );
       setReloadToken((token) => token + 1);
     } catch (error) {
@@ -167,7 +170,7 @@ export function QuickOutboundModal({
     setMessage("");
     const ok = await copy();
     if (!ok && clipboardText) {
-      setMessage("复制到剪贴板失败，请重试");
+      setMessage("自动复制失败，请使用下方手动复制");
     }
   }
 
@@ -366,6 +369,14 @@ export function QuickOutboundModal({
             </div>
           </div>
         </div>
+      )}
+      {success && (
+        <ClipboardCopyFallback
+          visible={copyFailed}
+          text={clipboardText}
+          onRetry={handleCopy}
+          onCopied={acknowledgeCopySuccess}
+        />
       )}
     </Modal>
   );

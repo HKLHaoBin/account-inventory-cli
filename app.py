@@ -16,11 +16,9 @@ import webbrowser
 from pathlib import Path
 
 import uvicorn
-from fastapi import HTTPException
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from api import app
+from frontend_static import mount_frontend
 from updater_runtime import maybe_start_auto_update, write_runtime_info
 
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -52,45 +50,6 @@ def ensure_frontend_build() -> None:
         cwd=WEB_DIR,
         check=True,
     )
-
-
-def frontend_file_for_path(path: str) -> Path:
-    requested = (WEB_OUT_DIR / path).resolve()
-    if requested.is_file() and WEB_OUT_DIR in requested.parents:
-        return requested
-
-    html_route = (WEB_OUT_DIR / f"{path}.html").resolve()
-    if html_route.is_file() and WEB_OUT_DIR in html_route.parents:
-        return html_route
-
-    route_index = (WEB_OUT_DIR / path / "index.html").resolve()
-    if route_index.is_file() and WEB_OUT_DIR in route_index.parents:
-        return route_index
-
-    return WEB_INDEX
-
-
-def mount_frontend() -> None:
-    if not WEB_INDEX.exists():
-        return
-
-    next_assets = WEB_OUT_DIR / "_next"
-    if next_assets.exists():
-        app.mount("/_next", StaticFiles(directory=next_assets), name="next-assets")
-
-    @app.get("/favicon.ico", include_in_schema=False)
-    def favicon() -> FileResponse:
-        icon = WEB_OUT_DIR / "favicon.ico"
-        if not icon.exists():
-            raise HTTPException(status_code=404)
-        return FileResponse(icon)
-
-    @app.get("/{path:path}", include_in_schema=False)
-    def frontend(path: str = "") -> FileResponse:
-        if path.startswith("api/") or path.startswith("ws/"):
-            raise HTTPException(status_code=404)
-
-        return FileResponse(frontend_file_for_path(path))
 
 
 def _browser_host(host: str) -> str:
@@ -149,7 +108,7 @@ def open_browser_after_start(host: str, port: int) -> threading.Thread:
 
 def main() -> None:
     ensure_frontend_build()
-    mount_frontend()
+    mount_frontend(app, WEB_OUT_DIR)
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PORT", "8000"))
     write_runtime_info(host, port, ROOT)

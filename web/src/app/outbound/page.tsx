@@ -11,6 +11,7 @@ import { PasswordField } from "@/components/ui/password-field";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import { commitFifo, previewFifo } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
@@ -35,6 +36,8 @@ export default function OutboundPage() {
     copy,
     copying,
     copied,
+    copyFailed,
+    acknowledgeCopySuccess,
   } = useLastOutboundClipboard();
   const [resultOpen, setResultOpen] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -136,7 +139,7 @@ export default function OutboundPage() {
       setResultMessage(
         copiedOk
           ? `已出库 ${payload.quantity} 条并复制到剪贴板`
-          : `已出库 ${payload.quantity} 条，复制失败请点重新复制`
+          : `已出库 ${payload.quantity} 条，自动复制失败，请手动复制`
       );
       setResultOpen(true);
       setQuantity(1);
@@ -173,7 +176,7 @@ export default function OutboundPage() {
     setLoadError("");
     const ok = await copy();
     if (!ok && clipboardText) {
-      setLoadError("复制到剪贴板失败，请重试");
+      setLoadError("自动复制失败，请使用下方手动复制");
     }
   }
 
@@ -467,6 +470,12 @@ export default function OutboundPage() {
             <p key={a.id}>{a.username}----••••</p>
           ))}
         </div>
+        <ClipboardCopyFallback
+          visible={copyFailed}
+          text={clipboardText}
+          onRetry={handleCopy}
+          onCopied={acknowledgeCopySuccess}
+        />
       </Modal>
     </div>
   );

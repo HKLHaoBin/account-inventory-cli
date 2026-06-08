@@ -6,7 +6,15 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PasswordField } from "@/components/ui/password-field";
-import { exportHistoryText, writeAppClipboardText } from "@/lib/api";
+import { exportHistoryText } from "@/lib/api";
+import {
+  type HistoryManualCopyKind,
+  resolveHistoryManualCopyRetry,
+  runAppClipboardCopy,
+  historyQuickActionRowError,
+} from "@/lib/clipboard-actions";
+import { ClipboardCopyError } from "@/lib/clipboard";
+import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import {
   defaultHistoryTextFilename,
   downloadTextFile,
@@ -45,12 +53,21 @@ interface HistoryTableProps {
 
 type HistoryCopyRecord = Parameters<typeof formatHistoryRecordLine>[0];
 
-async function copyLine(record: HistoryCopyRecord) {
-  try {
-    await writeAppClipboardText(formatHistoryRecordLine(record));
-  } catch (err) {
-    console.error("复制失败", err);
+async function copyLine(
+  record: HistoryCopyRecord,
+  onFailure: (text: string, reason: string) => void,
+  onSuccess: () => void
+) {
+  const text = formatHistoryRecordLine(record);
+  const outcome = await runAppClipboardCopy(text);
+  if (!outcome.ok) {
+    onFailure(
+      outcome.manualCopyText ?? text,
+      outcome.reason ?? "复制失败"
+    );
+    return;
   }
+  onSuccess();
 }
 
 function isHistoryRecord(
@@ -114,6 +131,8 @@ function RowActions({
   rowErrors,
   onReInboundClick,
   onOutboundFromInboundClick,
+  onCopyFailure,
+  onCopySuccess,
 }: {
   record: HistoryRecord | InboundRecord | OutboundRecord;
   mode: HistoryTableMode;
@@ -124,6 +143,8 @@ function RowActions({
   rowErrors: Record<string, string>;
   onReInboundClick: (record: OutboundRecord | HistoryRecord) => void;
   onOutboundFromInboundClick: (record: InboundRecord | HistoryRecord) => void;
+  onCopyFailure: (text: string, reason: string) => void;
+  onCopySuccess: () => void;
 }) {
   const showReInbound = canReInbound(record, mode, onReInbound);
   const showOutboundFromInbound = canOutboundFromInbound(
@@ -172,7 +193,7 @@ function RowActions({
           className="h-8 w-8 shrink-0"
           title="复制"
           disabled={Boolean(busyId) && busyId !== record.id}
-          onClick={() => void copyLine(record)}
+          onClick={() => void copyLine(record, onCopyFailure, onCopySuccess)}
         >
           <Copy className="h-3.5 w-3.5" />
         </Button>
@@ -202,6 +223,60 @@ export function HistoryTable({
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState("");
+  const [manualCopy, setManualCopy] = useState<{
+    text: string;
+    reason?: string;
+    kind: HistoryManualCopyKind;
+    onRetry: () => void | Promise<void>;
+  } | null>(null);
+
+  function clearManualCopy() {
+    setManualCopy(null);
+  }
+
+  function buildManualCopyRetry(
+    kind: HistoryManualCopyKind,
+    text: string
+  ): () => void | Promise<void> {
+    return resolveHistoryManualCopyRetry({
+      kind,
+      text,
+      retryTextCopy: retryCopyText,
+      retryExportAll: copyAll,
+    });
+  }
+
+  async function retryCopyText(text: string) {
+    const outcome = await runAppClipboardCopy(text);
+    if (outcome.ok) {
+      clearManualCopy();
+      setExportError("");
+      return;
+    }
+    const failedText = outcome.manualCopyText ?? text;
+    setManualCopy((current) => {
+      if (!current) return null;
+      return {
+        text: failedText,
+        reason: outcome.reason ?? current.reason ?? "复制失败",
+        kind: current.kind,
+        onRetry: buildManualCopyRetry(current.kind, failedText),
+      };
+    });
+  }
+
+  function registerCopyFailure(
+    text: string,
+    reason: string | undefined,
+    kind: HistoryManualCopyKind
+  ) {
+    setManualCopy({
+      text,
+      reason,
+      kind,
+      onRetry: buildManualCopyRetry(kind, text),
+    });
+  }
 
   const filenameMode = exportMode ?? mode;
   const bulkDisabled = loading || exportBusy || total === 0;
@@ -217,10 +292,14 @@ export function HistoryTable({
     });
     try {
       await onReInbound(record);
+      clearManualCopy();
     } catch (err) {
+      if (err instanceof ClipboardCopyError) {
+        registerCopyFailure(err.text, err.reason, "quick-action");
+      }
       setRowErrors((current) => ({
         ...current,
-        [record.id]: err instanceof Error ? err.message : "入库失败",
+        [record.id]: historyQuickActionRowError(err, "入库失败"),
       }));
     } finally {
       setBusyId(null);
@@ -239,10 +318,14 @@ export function HistoryTable({
     });
     try {
       await onOutboundFromInbound(record);
+      clearManualCopy();
     } catch (err) {
+      if (err instanceof ClipboardCopyError) {
+        registerCopyFailure(err.text, err.reason, "quick-action");
+      }
       setRowErrors((current) => ({
         ...current,
-        [record.id]: err instanceof Error ? err.message : "出库失败",
+        [record.id]: historyQuickActionRowError(err, "出库失败"),
       }));
     } finally {
       setBusyId(null);
@@ -263,10 +346,20 @@ export function HistoryTable({
     setExportBusy(true);
     try {
       const text = await fetchExportText();
-      await writeAppClipboardText(text);
+      const outcome = await runAppClipboardCopy(text);
+      if (!outcome.ok) {
+        const failedText = outcome.manualCopyText ?? text;
+        registerCopyFailure(
+          failedText,
+          outcome.reason ?? "复制失败",
+          "export-all"
+        );
+        setExportError(outcome.reason ?? "复制失败");
+      } else {
+        clearManualCopy();
+      }
     } catch (err) {
       setExportError(err instanceof Error ? err.message : "复制失败");
-      console.error("复制失败", err);
     } finally {
       setExportBusy(false);
     }
@@ -353,6 +446,13 @@ export function HistoryTable({
           <p className="text-sm text-red-600">{exportError}</p>
         )}
       </div>
+      <ClipboardCopyFallback
+        visible={Boolean(manualCopy?.text)}
+        text={manualCopy?.text ?? ""}
+        reason={manualCopy?.reason}
+        onRetry={() => void manualCopy?.onRetry()}
+        onCopied={clearManualCopy}
+      />
       {groups.map((group) => (
         <div key={group.label} className="space-y-3">
           <h2 className="text-sm font-semibold text-muted-foreground">
@@ -403,6 +503,10 @@ export function HistoryTable({
                               onOutboundFromInboundClick={
                                 handleOutboundFromInboundClick
                               }
+                              onCopyFailure={(text, reason) =>
+                                registerCopyFailure(text, reason, "line")
+                              }
+                              onCopySuccess={clearManualCopy}
                             />
                           </td>
                           {mode === "all" && history && (
@@ -484,6 +588,10 @@ export function HistoryTable({
                           onOutboundFromInboundClick={
                             handleOutboundFromInboundClick
                           }
+                          onCopyFailure={(text, reason) =>
+                            registerCopyFailure(text, reason, "line")
+                          }
+                          onCopySuccess={clearManualCopy}
                         />
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex flex-wrap items-center gap-2">
