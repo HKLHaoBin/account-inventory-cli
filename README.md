@@ -62,6 +62,22 @@ setx UPDATE_ADMIN_TOKEN "your-token"
 
 使用 `setx` 后需要重启应用。之后在设置页执行更新，或删除数据库的二次确认弹窗中输入同一个令牌。
 
+### 远程访问令牌
+
+`REMOTE_ACCESS_TOKEN` 用于保护非本机访问。当服务监听 `127.0.0.1` 时，本机浏览器访问不需要此令牌；若通过 `HOST=0.0.0.0`、局域网 IP 或公网地址暴露服务，则必须先配置远程访问令牌。
+
+远程访问令牌与 `UPDATE_ADMIN_TOKEN` 职责不同：前者控制页面、API 和 WebSocket 的远程入口；后者仍仅用于执行更新和删除数据库。两者可以设置为同一个值。
+
+临时从当前 PowerShell 会话以局域网模式启动：
+
+```powershell
+$env:REMOTE_ACCESS_TOKEN="your-access-token"; $env:HOST="0.0.0.0"; python app.py
+```
+
+非本机访问时，浏览器会先进入 `/remote-access` 页面输入令牌；验证成功后通过 HttpOnly Cookie 保持会话。API 客户端也可通过请求头 `X-Remote-Access-Token` 携带令牌。
+
+云模式本地客户端可在设置页的「远端访问令牌」中配置远端后端的令牌；代理请求远端 `/api/...` 时会自动注入该请求头，但不会在 `/local/config` 响应中回传明文令牌。
+
 ## 使用说明
 
 启动后进入交互菜单：

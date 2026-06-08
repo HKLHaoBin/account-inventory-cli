@@ -26,6 +26,11 @@ from pydantic import BaseModel
 import clipboard
 from cloud_config import CloudConfig, load_config, save_config
 from frontend_static import mount_frontend
+from remote_access import (
+    REMOTE_ACCESS_HEADER,
+    ensure_remote_access_websocket,
+    install_remote_access,
+)
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -56,6 +61,7 @@ ROOT = resolve_web_root()
 WEB_OUT_DIR = ROOT / "web" / "out"
 
 app = FastAPI(title="Account Inventory Cloud Client")
+install_remote_access(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -71,10 +77,12 @@ app.add_middleware(
 class CloudConfigPayload(BaseModel):
     cloudApiBaseUrl: str | None
     configured: bool
+    remoteAccessTokenConfigured: bool
 
 
 class CloudConfigUpdateRequest(BaseModel):
     cloudApiBaseUrl: str = ""
+    remoteAccessToken: str | None = None
 
 
 class ClipboardIgnoreRequest(BaseModel):
@@ -86,6 +94,7 @@ def _config_payload(config: CloudConfig | None = None) -> CloudConfigPayload:
     return CloudConfigPayload(
         cloudApiBaseUrl=current.cloud_api_base_url,
         configured=current.configured,
+        remoteAccessTokenConfigured=bool(current.remote_access_token),
     )
 
 
@@ -116,7 +125,13 @@ def get_local_config() -> CloudConfigPayload:
 @app.put("/local/config", response_model=CloudConfigPayload)
 def put_local_config(payload: CloudConfigUpdateRequest) -> CloudConfigPayload:
     try:
-        config = save_config(payload.cloudApiBaseUrl)
+        if payload.remoteAccessToken is None:
+            config = save_config(payload.cloudApiBaseUrl)
+        else:
+            config = save_config(
+                payload.cloudApiBaseUrl,
+                remote_access_token=payload.remoteAccessToken,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _config_payload(config)
@@ -129,8 +144,11 @@ def test_local_config() -> dict[str, bool]:
         raise HTTPException(status_code=428, detail="请先配置数据库服务地址")
 
     url = f"{config.cloud_api_base_url}/api/dashboard"
+    headers: dict[str, str] = {}
+    if config.remote_access_token:
+        headers[REMOTE_ACCESS_HEADER] = config.remote_access_token
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=10, headers=headers)
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"无法连接云端服务：{exc}") from exc
 
@@ -150,6 +168,8 @@ def ignore_clipboard(payload: ClipboardIgnoreRequest) -> dict[str, bool]:
 
 @app.websocket("/ws/clipboard")
 async def clipboard_socket(websocket: WebSocket) -> None:
+    if not await ensure_remote_access_websocket(websocket):
+        return
     await websocket.accept()
     last_seen: str | None = None
     try:
@@ -178,6 +198,8 @@ async def proxy_api(request: Request, path: str) -> Response:
 
     body = await request.body()
     headers = _forward_headers(request)
+    if config.remote_access_token:
+        headers[REMOTE_ACCESS_HEADER] = config.remote_access_token
 
     try:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:

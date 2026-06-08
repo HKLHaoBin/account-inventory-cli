@@ -31,6 +31,7 @@ describe("local-config client", () => {
         json: async () => ({
           cloudApiBaseUrl: null,
           configured: false,
+          remoteAccessTokenConfigured: false,
         }),
       })
       .mockResolvedValueOnce({
@@ -38,6 +39,7 @@ describe("local-config client", () => {
         json: async () => ({
           cloudApiBaseUrl: "https://cloud.example",
           configured: true,
+          remoteAccessTokenConfigured: false,
         }),
       });
     vi.stubGlobal("fetch", fetchMock);
@@ -45,11 +47,13 @@ describe("local-config client", () => {
     await expect(fetchLocalConfig()).resolves.toEqual({
       cloudApiBaseUrl: null,
       configured: false,
+      remoteAccessTokenConfigured: false,
     });
 
     await expect(saveLocalConfig("https://cloud.example")).resolves.toEqual({
       cloudApiBaseUrl: "https://cloud.example",
       configured: true,
+      remoteAccessTokenConfigured: false,
     });
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -73,6 +77,39 @@ describe("local-config client", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/local/config/test",
       expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("saves remote access token in request body when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        cloudApiBaseUrl: "https://cloud.example",
+        configured: true,
+        remoteAccessTokenConfigured: true,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      saveLocalConfig("https://cloud.example", {
+        remoteAccessToken: "remote-secret",
+      })
+    ).resolves.toEqual({
+      cloudApiBaseUrl: "https://cloud.example",
+      configured: true,
+      remoteAccessTokenConfigured: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/local/config",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          cloudApiBaseUrl: "https://cloud.example",
+          remoteAccessToken: "remote-secret",
+        }),
+      })
     );
   });
 });

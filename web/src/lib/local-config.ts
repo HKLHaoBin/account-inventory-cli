@@ -3,6 +3,7 @@ import { readHttpErrorDetail } from "@/lib/http-error";
 export interface LocalConfigPayload {
   cloudApiBaseUrl: string | null;
   configured: boolean;
+  remoteAccessTokenConfigured: boolean;
 }
 
 async function requestLocalJson<T>(
@@ -41,11 +42,16 @@ export async function fetchLocalConfig(): Promise<LocalConfigPayload | null> {
 }
 
 export function saveLocalConfig(
-  cloudApiBaseUrl: string
+  cloudApiBaseUrl: string,
+  options?: { remoteAccessToken?: string | null }
 ): Promise<LocalConfigPayload> {
+  const body: Record<string, string | null> = { cloudApiBaseUrl };
+  if (options && "remoteAccessToken" in options) {
+    body.remoteAccessToken = options.remoteAccessToken ?? "";
+  }
   return requestLocalJson<LocalConfigPayload>("/local/config", {
     method: "PUT",
-    body: JSON.stringify({ cloudApiBaseUrl }),
+    body: JSON.stringify(body),
   });
 }
 

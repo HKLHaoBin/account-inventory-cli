@@ -1078,12 +1078,12 @@ def test_handle_entry_outbound_paste() -> None:
     assert db.exists_in_outbound("new")
 
 
-def _api_client():
+def _api_client(client_host: str = "testclient"):
     from fastapi.testclient import TestClient
 
     import api
 
-    return TestClient(api.app)
+    return TestClient(api.app, client=(client_host, 50000))
 
 
 def test_api_separator_rules() -> None:
@@ -3810,6 +3810,114 @@ def test_updater_whitelist_blocks_data_and_source() -> None:
     assert not updater.is_allowed("web/src/app/page.tsx")
 
 
+def test_remote_access_loopback_without_token() -> None:
+    client = _api_client("127.0.0.1")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": ""}, clear=False):
+        response = client.get("/api/dashboard")
+        assert response.status_code == 200
+
+
+def test_remote_access_ipv4_mapped_loopback() -> None:
+    import remote_access
+
+    assert remote_access.is_loopback_host("::ffff:127.0.0.1") is True
+    assert remote_access.is_loopback_host("::ffff:7f00:1") is True
+    assert remote_access.is_loopback_host("[::ffff:127.0.0.1]") is True
+    assert remote_access.is_loopback_host("::ffff:192.168.1.10") is False
+
+    client = _api_client("::ffff:127.0.0.1")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": "remote-secret"}, clear=False):
+        response = client.get("/api/dashboard")
+        assert response.status_code == 200
+
+
+def test_remote_access_non_loopback_requires_env() -> None:
+    client = _api_client("192.168.1.10")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": ""}, clear=False):
+        response = client.get("/api/dashboard")
+        assert response.status_code == 403
+        assert "REMOTE_ACCESS_TOKEN is not configured" in response.json()["detail"]
+
+
+def test_remote_access_non_loopback_requires_token() -> None:
+    client = _api_client("192.168.1.10")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": "remote-secret"}, clear=False):
+        response = client.get("/api/dashboard")
+        assert response.status_code == 401
+        assert response.json()["detail"] == "invalid remote access token"
+
+
+def test_remote_access_non_loopback_accepts_header() -> None:
+    client = _api_client("192.168.1.10")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": "remote-secret"}, clear=False):
+        response = client.get(
+            "/api/dashboard",
+            headers={"X-Remote-Access-Token": "remote-secret"},
+        )
+        assert response.status_code == 200
+
+
+def test_remote_access_non_loopback_redirects_frontend() -> None:
+    client = _api_client("192.168.1.10")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": "remote-secret"}, clear=False):
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"].startswith("/remote-access?next=")
+
+
+def test_remote_access_session_cookie_allows_api() -> None:
+    client = _api_client("192.168.1.10")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": "remote-secret"}, clear=False):
+        session = client.post(
+            "/api/remote-access/session",
+            json={"token": "remote-secret"},
+        )
+        assert session.status_code == 200
+        assert session.cookies.get("remote_access_token") == "remote-secret"
+
+        authed = _api_client("192.168.1.10")
+        authed.cookies.set("remote_access_token", "remote-secret")
+        response = authed.get("/api/dashboard")
+        assert response.status_code == 200
+
+
+def test_remote_access_websocket_requires_cookie() -> None:
+    client = _api_client("192.168.1.10")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": "remote-secret"}, clear=False):
+        with mock.patch("api.clipboard.read_text", return_value=""):
+            rejected = False
+            try:
+                with client.websocket_connect("/ws/clipboard"):
+                    pass
+            except Exception:
+                rejected = True
+            assert rejected
+
+
+def test_remote_access_websocket_accepts_cookie() -> None:
+    client = _api_client("192.168.1.10")
+    client.cookies.set("remote_access_token", "remote-secret")
+    with mock.patch.dict("os.environ", {"REMOTE_ACCESS_TOKEN": "remote-secret"}, clear=False):
+        with mock.patch("api.clipboard.read_text", return_value=""):
+            with client.websocket_connect("/ws/clipboard") as websocket:
+                websocket.close()
+
+
+def test_remote_access_cookie_does_not_bypass_update_token() -> None:
+    _reset_inventory()
+    client = _api_client("192.168.1.10")
+    client.cookies.set("remote_access_token", "remote-secret")
+    with mock.patch.dict(
+        "os.environ",
+        {"REMOTE_ACCESS_TOKEN": "remote-secret", "UPDATE_ADMIN_TOKEN": "admin-secret"},
+        clear=False,
+    ):
+        databases = client.get("/api/databases").json()["databases"]
+        target_id = databases[0]["id"]
+        response = client.delete(f"/api/databases/{target_id}")
+        assert response.status_code == 403
+
+
 def test_update_trigger_token_guard() -> None:
     import updater_runtime
 
@@ -4143,6 +4251,22 @@ def run_all() -> tuple[int, list[str]]:
         ("download retry http status", test_download_to_retries_503_but_not_404),
         ("updater whitelist", test_updater_whitelist_blocks_data_and_source),
         ("update trigger token guard", test_update_trigger_token_guard),
+        ("remote access loopback without token", test_remote_access_loopback_without_token),
+        (
+            "remote access ipv4 mapped loopback",
+            test_remote_access_ipv4_mapped_loopback,
+        ),
+        ("remote access non loopback requires env", test_remote_access_non_loopback_requires_env),
+        ("remote access non loopback requires token", test_remote_access_non_loopback_requires_token),
+        ("remote access non loopback accepts header", test_remote_access_non_loopback_accepts_header),
+        ("remote access non loopback redirects frontend", test_remote_access_non_loopback_redirects_frontend),
+        ("remote access session cookie allows api", test_remote_access_session_cookie_allows_api),
+        ("remote access websocket requires cookie", test_remote_access_websocket_requires_cookie),
+        ("remote access websocket accepts cookie", test_remote_access_websocket_accepts_cookie),
+        (
+            "remote access cookie does not bypass update token",
+            test_remote_access_cookie_does_not_bypass_update_token,
+        ),
         ("launch update once command", test_launch_update_once_command),
         ("app browser url localhost", test_app_browser_url_localhost),
         ("app browser url wildcard host", test_app_browser_url_wildcard_host),
@@ -4156,10 +4280,23 @@ def run_all() -> tuple[int, list[str]]:
         ),
         ("cloud config save and load", test_cloud_app.test_cloud_config_save_and_load),
         (
+            "cloud config preserves token when not provided",
+            test_cloud_app.test_cloud_config_preserves_token_when_not_provided,
+        ),
+        ("cloud config clears token", test_cloud_app.test_cloud_config_clears_token),
+        (
+            "cloud load config without token field",
+            test_cloud_app.test_cloud_load_config_without_token_field,
+        ),
+        (
             "cloud proxy requires configuration",
             test_cloud_app.test_cloud_proxy_requires_configuration,
         ),
         ("cloud proxy forwards request", test_cloud_app.test_cloud_proxy_forwards_request),
+        (
+            "cloud proxy does not inject token when unconfigured",
+            test_cloud_app.test_cloud_proxy_does_not_inject_token_when_unconfigured,
+        ),
         (
             "cloud clipboard ignore local",
             test_cloud_app.test_cloud_clipboard_ignore_is_local,

@@ -41,13 +41,64 @@ def test_cloud_config_save_and_load() -> None:
             saved = cloud_config.save_config("https://example.com/")
             assert saved.cloud_api_base_url == "https://example.com"
             assert saved.configured is True
+            assert saved.remote_access_token is None
+
+            saved_with_token = cloud_config.save_config(
+                "https://example.com/",
+                remote_access_token="remote-secret",
+            )
+            assert saved_with_token.remote_access_token == "remote-secret"
 
             loaded = cloud_config.load_config()
             assert loaded.cloud_api_base_url == "https://example.com"
+            assert loaded.remote_access_token == "remote-secret"
             assert cloud_config.is_configured() is True
 
             payload = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
             assert payload["cloudApiBaseUrl"] == "https://example.com"
+            assert payload["remoteAccessToken"] == "remote-secret"
+
+
+def test_cloud_config_preserves_token_when_not_provided() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        with _patch_config_dir(Path(tmp)):
+            cloud_config.save_config(
+                "https://example.com/",
+                remote_access_token="keep-me",
+            )
+            saved = cloud_config.save_config("https://remote.test/")
+            assert saved.remote_access_token == "keep-me"
+
+
+def test_cloud_config_clears_token() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        config_dir = Path(tmp)
+        with _patch_config_dir(config_dir):
+            cloud_config.save_config(
+                "https://example.com/",
+                remote_access_token="remote-secret",
+            )
+            saved = cloud_config.save_config(
+                "https://example.com/",
+                remote_access_token="",
+            )
+            assert saved.remote_access_token is None
+            payload = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
+            assert "remoteAccessToken" not in payload
+
+
+def test_cloud_load_config_without_token_field() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        config_dir = Path(tmp)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.json").write_text(
+            json.dumps({"cloudApiBaseUrl": "https://legacy.example"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        with _patch_config_dir(config_dir):
+            loaded = cloud_config.load_config()
+            assert loaded.cloud_api_base_url == "https://legacy.example"
+            assert loaded.remote_access_token is None
 
 
 def test_cloud_proxy_requires_configuration() -> None:
@@ -65,7 +116,10 @@ def test_cloud_proxy_forwards_request() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config_dir = Path(tmp)
         with _patch_config_dir(config_dir):
-            cloud_config.save_config("https://cloud.example")
+            cloud_config.save_config(
+                "https://cloud.example",
+                remote_access_token="remote-secret",
+            )
 
             fake_response = httpx.Response(
                 200,
@@ -93,6 +147,40 @@ def test_cloud_proxy_forwards_request() -> None:
             assert call.args[0] == "POST"
             assert call.args[1] == "https://cloud.example/api/inbound/preview?dry=1"
             assert b"user----pass" in call.kwargs["content"]
+            forwarded_headers = {
+                key.lower(): value for key, value in call.kwargs["headers"].items()
+            }
+            assert forwarded_headers["x-remote-access-token"] == "remote-secret"
+
+
+def test_cloud_proxy_does_not_inject_token_when_unconfigured() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        config_dir = Path(tmp)
+        with _patch_config_dir(config_dir):
+            cloud_config.save_config("https://cloud.example")
+
+            fake_response = httpx.Response(
+                200,
+                json={"inventoryCount": 3},
+                headers={"content-type": "application/json"},
+            )
+            fake_client = mock.AsyncMock()
+            fake_client.request = mock.AsyncMock(return_value=fake_response)
+            fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
+            fake_client.__aexit__ = mock.AsyncMock(return_value=None)
+
+            from fastapi.testclient import TestClient
+
+            with mock.patch("cloud_app.httpx.AsyncClient", return_value=fake_client):
+                client = TestClient(cloud_app.app)
+                response = client.get("/api/dashboard")
+
+            assert response.status_code == 200
+            call = fake_client.request.await_args
+            forwarded_headers = {
+                key.lower(): value for key, value in call.kwargs["headers"].items()
+            }
+            assert "x-remote-access-token" not in forwarded_headers
 
 
 def test_cloud_clipboard_ignore_is_local() -> None:
@@ -130,6 +218,7 @@ def test_cloud_local_config_endpoints() -> None:
             assert response.json() == {
                 "cloudApiBaseUrl": None,
                 "configured": False,
+                "remoteAccessTokenConfigured": False,
             }
 
             response = client.put(
@@ -140,14 +229,31 @@ def test_cloud_local_config_endpoints() -> None:
             assert response.json() == {
                 "cloudApiBaseUrl": "https://remote.test",
                 "configured": True,
+                "remoteAccessTokenConfigured": False,
             }
+
+            response = client.put(
+                "/local/config",
+                json={
+                    "cloudApiBaseUrl": "https://remote.test/",
+                    "remoteAccessToken": "remote-secret",
+                },
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["remoteAccessTokenConfigured"] is True
+            assert "remoteAccessToken" not in body
+            assert "remote-secret" not in response.text
 
 
 def test_cloud_local_config_test_success() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config_dir = Path(tmp)
         with _patch_config_dir(config_dir):
-            cloud_config.save_config("https://remote.test")
+            cloud_config.save_config(
+                "https://remote.test",
+                remote_access_token="remote-secret",
+            )
             fake_response = mock.Mock()
             fake_response.status_code = 200
             fake_response.text = '{"database":{"name":"main"}}'
@@ -166,6 +272,7 @@ def test_cloud_local_config_test_success() -> None:
             get_mock.assert_called_once_with(
                 "https://remote.test/api/dashboard",
                 timeout=10,
+                headers={"X-Remote-Access-Token": "remote-secret"},
             )
 
 
@@ -228,6 +335,7 @@ def test_cloud_local_config_with_invalid_stored_url() -> None:
             assert response.json() == {
                 "cloudApiBaseUrl": None,
                 "configured": False,
+                "remoteAccessTokenConfigured": False,
             }
 
 
@@ -235,7 +343,10 @@ def test_cloud_proxy_strips_encoding_headers() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config_dir = Path(tmp)
         with _patch_config_dir(config_dir):
-            cloud_config.save_config("https://cloud.example")
+            cloud_config.save_config(
+                "https://cloud.example",
+                remote_access_token="remote-secret",
+            )
 
             fake_response = mock.Mock()
             fake_response.status_code = 200

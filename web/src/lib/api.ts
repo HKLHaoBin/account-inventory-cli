@@ -93,10 +93,13 @@ async function requestJson<T>(
   });
 
   if (!response.ok) {
-    const detail = await readHttpErrorDetail(
-      response,
-      response.status === 428 ? "请先配置数据库服务地址" : undefined
-    );
+    const detail =
+      response.status === 401
+        ? "需要远程访问令牌，请先完成远程访问验证"
+        : await readHttpErrorDetail(
+            response,
+            response.status === 428 ? "请先配置数据库服务地址" : undefined
+          );
     throw new Error(detail);
   }
 

@@ -15,6 +15,7 @@ import clipboard
 import database as db
 import updater_runtime
 from parser import extract_valid_account_lines, format_account, parse_account_line
+from remote_access import ensure_remote_access_websocket, install_remote_access
 
 InboundCategory = Literal["ready", "duplicate", "pending", "invalid", "batchDuplicate"]
 OutboundCategory = Literal[
@@ -23,6 +24,7 @@ OutboundCategory = Literal[
 CommitStatus = Literal["success", "error", "warning", "skipped"]
 
 app = FastAPI(title="Account Inventory API")
+install_remote_access(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -1523,6 +1525,8 @@ def commit_outbound_by_username(
 
 @app.websocket("/ws/clipboard")
 async def clipboard_socket(websocket: WebSocket) -> None:
+    if not await ensure_remote_access_websocket(websocket):
+        return
     await websocket.accept()
     last_seen: str | None = None
     try:

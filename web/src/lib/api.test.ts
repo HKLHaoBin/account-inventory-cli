@@ -73,4 +73,21 @@ describe("requestJson cloud configuration errors", () => {
 
     await expect(fetchDashboard()).rejects.toThrow("请先配置数据库服务地址");
   });
+
+  it("throws a friendly message for HTTP 401 remote access gate", async () => {
+    const { fetchDashboard } = await import("./api");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: async () =>
+          JSON.stringify({ detail: "invalid remote access token" }),
+      })
+    );
+
+    await expect(fetchDashboard()).rejects.toThrow(
+      "需要远程访问令牌，请先完成远程访问验证"
+    );
+  });
 });

@@ -116,6 +116,11 @@ export default function SettingsPage() {
   const [isCloudMode, setIsCloudMode] = useState<boolean | null>(null);
   const [cloudApiBaseUrl, setCloudApiBaseUrl] = useState("");
   const [cloudConfigured, setCloudConfigured] = useState(false);
+  const [cloudRemoteAccessToken, setCloudRemoteAccessToken] = useState("");
+  const [cloudRemoteAccessTokenConfigured, setCloudRemoteAccessTokenConfigured] =
+    useState(false);
+  const [cloudRemoteAccessTokenDirty, setCloudRemoteAccessTokenDirty] =
+    useState(false);
   const [cloudConfigError, setCloudConfigError] = useState("");
   const [cloudConfigMessage, setCloudConfigMessage] = useState("");
   const [savingCloudConfig, setSavingCloudConfig] = useState(false);
@@ -164,6 +169,9 @@ export default function SettingsPage() {
       setIsCloudMode(true);
       setCloudApiBaseUrl(payload.cloudApiBaseUrl ?? "");
       setCloudConfigured(payload.configured);
+      setCloudRemoteAccessTokenConfigured(payload.remoteAccessTokenConfigured);
+      setCloudRemoteAccessToken("");
+      setCloudRemoteAccessTokenDirty(false);
       setCloudConfigError("");
     } catch (error) {
       setIsCloudMode(false);
@@ -372,9 +380,17 @@ export default function SettingsPage() {
     }
     setSavingCloudConfig(true);
     try {
-      const payload = await saveLocalConfig(url);
+      const payload = await saveLocalConfig(
+        url,
+        cloudRemoteAccessTokenDirty
+          ? { remoteAccessToken: cloudRemoteAccessToken.trim() }
+          : undefined
+      );
       setCloudApiBaseUrl(payload.cloudApiBaseUrl ?? "");
       setCloudConfigured(payload.configured);
+      setCloudRemoteAccessTokenConfigured(payload.remoteAccessTokenConfigured);
+      setCloudRemoteAccessToken("");
+      setCloudRemoteAccessTokenDirty(false);
       setCloudConfigError("");
       setCloudConfigMessage("服务地址已保存");
     } catch (error) {
@@ -387,15 +403,54 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleClearCloudRemoteAccessToken() {
+    const url = cloudApiBaseUrl.trim();
+    if (!url) {
+      setCloudConfigError("请先填写并保存数据库服务地址");
+      setCloudConfigMessage("");
+      return;
+    }
+    setSavingCloudConfig(true);
+    try {
+      const payload = await saveLocalConfig(url, { remoteAccessToken: "" });
+      setCloudRemoteAccessToken("");
+      setCloudRemoteAccessTokenDirty(false);
+      setCloudRemoteAccessTokenConfigured(payload.remoteAccessTokenConfigured);
+      setCloudConfigError("");
+      setCloudConfigMessage("远端访问令牌已清空");
+    } catch (error) {
+      setCloudConfigMessage("");
+      setCloudConfigError(
+        error instanceof Error ? error.message : "清空远端访问令牌失败"
+      );
+    } finally {
+      setSavingCloudConfig(false);
+    }
+  }
+
   async function handleTestCloudConfig() {
     setTestingCloudConfig(true);
     setCloudConfigMessage("");
     try {
+      let savedPayload: Awaited<ReturnType<typeof saveLocalConfig>> | null = null;
       if (cloudApiBaseUrl.trim()) {
-        await saveLocalConfig(cloudApiBaseUrl.trim());
+        savedPayload = await saveLocalConfig(
+          cloudApiBaseUrl.trim(),
+          cloudRemoteAccessTokenDirty
+            ? { remoteAccessToken: cloudRemoteAccessToken.trim() }
+            : undefined
+        );
       }
       await testLocalConfig();
-      setCloudConfigured(true);
+      if (savedPayload) {
+        setCloudApiBaseUrl(savedPayload.cloudApiBaseUrl ?? "");
+        setCloudConfigured(savedPayload.configured);
+        setCloudRemoteAccessTokenConfigured(savedPayload.remoteAccessTokenConfigured);
+        setCloudRemoteAccessToken("");
+        setCloudRemoteAccessTokenDirty(false);
+      } else {
+        setCloudConfigured(true);
+      }
       setCloudConfigError("");
       setCloudConfigMessage("连接测试成功");
     } catch (error) {
@@ -554,9 +609,26 @@ export default function SettingsPage() {
                 </p>
               </div>
               <div>
+                <p className="text-xs text-muted-foreground">远端访问令牌</p>
+                <p
+                  className={`mt-1 flex items-center gap-1.5 ${
+                    cloudRemoteAccessTokenConfigured
+                      ? "text-emerald-600"
+                      : "text-amber-600"
+                  }`}
+                >
+                  {cloudRemoteAccessTokenConfigured ? (
+                    <CheckCircle2 className="h-4 w-4" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4" />
+                  )}
+                  {cloudRemoteAccessTokenConfigured ? "已配置" : "未配置"}
+                </p>
+              </div>
+              <div className="sm:col-span-2">
                 <p className="text-xs text-muted-foreground">说明</p>
                 <p className="mt-1 text-foreground">
-                  填写云端后端 API 根地址，业务请求仍走 `/api/...`。
+                  填写云端后端 API 根地址；若远端启用了远程访问门禁，请配置对应令牌。业务请求仍走 `/api/...`。
                 </p>
               </div>
             </div>
@@ -566,6 +638,23 @@ export default function SettingsPage() {
                 value={cloudApiBaseUrl}
                 onChange={(event) => setCloudApiBaseUrl(event.target.value)}
                 placeholder="https://example.com"
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">远端访问令牌</label>
+              <Input
+                value={cloudRemoteAccessToken}
+                onChange={(event) => {
+                  setCloudRemoteAccessToken(event.target.value);
+                  setCloudRemoteAccessTokenDirty(true);
+                }}
+                placeholder={
+                  cloudRemoteAccessTokenConfigured
+                    ? "已配置，输入新值可覆盖"
+                    : "远端 REMOTE_ACCESS_TOKEN"
+                }
+                type="password"
                 autoComplete="off"
               />
             </div>
@@ -599,6 +688,18 @@ export default function SettingsPage() {
                   }
                 />
                 测试连接
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleClearCloudRemoteAccessToken()}
+                disabled={
+                  savingCloudConfig ||
+                  testingCloudConfig ||
+                  !cloudRemoteAccessTokenConfigured
+                }
+              >
+                清空令牌
               </Button>
             </div>
           </CardContent>
