@@ -160,7 +160,7 @@ class KlineTotalsPayload(BaseModel):
 class KlinePayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 
-    bucket: Literal["hour", "day", "week", "month"]
+    bucket: Literal["second", "minute", "hour", "day", "week", "month"]
     from_: str = Field(alias="from")
     to: str
     candles: list[KlineCandlePayload]
@@ -1146,7 +1146,7 @@ def export_history(
 def get_history_kline(
     from_value: str | None = Query(default=None, alias="from"),
     to_value: str | None = Query(default=None, alias="to"),
-    bucket: Literal["auto", "hour", "day", "week", "month"] = "auto",
+    bucket: Literal["auto", "second", "minute", "hour", "day", "week", "month"] = "auto",
     q: str = "",
     ranges: list[str] = Query(default=[]),
 ) -> KlinePayload:

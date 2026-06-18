@@ -1,13 +1,48 @@
 import type { KlineBucket } from "@/types/account";
 
-const MS_HOUR = 60 * 60 * 1000;
+const MS_SECOND = 1000;
+const MS_MINUTE = 60 * MS_SECOND;
+const MS_HOUR = 60 * MS_MINUTE;
 const MS_DAY = 24 * MS_HOUR;
+const TEN_MINUTES = 10 * MS_MINUTE;
+const TWELVE_HOURS = 12 * MS_HOUR;
 const TWO_DAYS = 2 * MS_DAY;
 const ONE_HUNDRED_TWENTY_DAYS = 120 * MS_DAY;
 const TWO_YEARS = 730 * MS_DAY;
 const MAX_BUCKETS = 500;
 
-const BUCKET_ORDER: KlineBucket[] = ["hour", "day", "week", "month"];
+const BUCKET_ORDER: KlineBucket[] = [
+  "second",
+  "minute",
+  "hour",
+  "day",
+  "week",
+  "month",
+];
+
+function startOfSecond(date: Date): Date {
+  return new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    0
+  );
+}
+
+function startOfMinute(date: Date): Date {
+  return new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+    date.getHours(),
+    date.getMinutes(),
+    0,
+    0
+  );
+}
 
 function startOfHour(date: Date): Date {
   return new Date(
@@ -40,6 +75,10 @@ function startOfMonth(date: Date): Date {
 function floorToBucketMs(ms: number, bucket: KlineBucket): number {
   const date = new Date(ms);
   switch (bucket) {
+    case "second":
+      return startOfSecond(date).getTime();
+    case "minute":
+      return startOfMinute(date).getTime();
     case "hour":
       return startOfHour(date).getTime();
     case "day":
@@ -54,6 +93,10 @@ function floorToBucketMs(ms: number, bucket: KlineBucket): number {
 function advanceBucketMs(ms: number, bucket: KlineBucket): number {
   const date = new Date(ms);
   switch (bucket) {
+    case "second":
+      return ms + MS_SECOND;
+    case "minute":
+      return ms + MS_MINUTE;
     case "hour":
       return ms + MS_HOUR;
     case "day":
@@ -87,6 +130,8 @@ export function countBuckets(
 
 function baseAutoBucket(fromMs: number, toMs: number): KlineBucket {
   const span = Math.max(0, toMs - fromMs);
+  if (span <= TEN_MINUTES) return "second";
+  if (span <= TWELVE_HOURS) return "minute";
   if (span <= TWO_DAYS) return "hour";
   if (span <= ONE_HUNDRED_TWENTY_DAYS) return "day";
   if (span <= TWO_YEARS) return "week";

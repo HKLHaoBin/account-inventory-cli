@@ -303,7 +303,7 @@ export interface SeparatorRuleListPayload {
   rules: SeparatorRule[];
 }
 
-export type KlineBucket = "hour" | "day" | "week" | "month";
+export type KlineBucket = "second" | "minute" | "hour" | "day" | "week" | "month";
 
 export interface KlineCandle {
   time: string;

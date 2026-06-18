@@ -941,6 +941,133 @@ export default function DashboardPage() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
         <Card>
+          <CardHeader className="p-4 pb-3 sm:p-6 sm:pb-4">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Upload className="h-4 w-4 text-primary" />
+              快速 FIFO 出库
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 p-4 pt-0 sm:p-6 sm:pt-0">
+            <div className="flex items-center justify-center gap-3">
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => setFifoQuantity((value) => Math.max(0, value - 1))}
+                disabled={fifoQuantity <= 0}
+              >
+                <Minus className="h-4 w-4" />
+              </Button>
+              <input
+                ref={fifoQuantityRef}
+                type="number"
+                value={fifoQuantity}
+                onChange={(event) => setFifoQuantity(Number(event.target.value))}
+                className="h-11 w-24 rounded-[10px] border border-border bg-background px-3 text-center text-xl font-semibold focus:outline-none focus:ring-2 focus:ring-primary/30"
+                min={0}
+              />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() =>
+                  setFifoQuantity((value) =>
+                    Math.min(fifoPreview.max || value + 1, value + 1)
+                  )
+                }
+                disabled={fifoPreview.max === 0 || fifoQuantity >= fifoPreview.max}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="flex flex-wrap justify-center gap-2">
+              {fifoChips.map((amount) => (
+                <Button
+                  key={amount}
+                  variant={fifoPreview.quantity === amount ? "primary" : "secondary"}
+                  size="sm"
+                  onClick={() => setFifoQuantity(amount)}
+                >
+                  {amount === fifoPreview.max ? "全部" : amount}
+                </Button>
+              ))}
+            </div>
+
+            <BatchNoteControls
+              rows={fifoNotes.map((entry) => ({
+                clientId: entry.username,
+                username: entry.username,
+                note: entry.note,
+                overwriteNote: entry.overwriteNote,
+              }))}
+              onRowsChange={(rows) =>
+                setFifoNotes(
+                  rows.map((row) => ({
+                    username: row.username ?? "",
+                    note: row.note,
+                    overwriteNote: row.overwriteNote,
+                  }))
+                )
+              }
+              disabled={fifoBusy}
+            />
+
+            <div className="grid gap-2 sm:grid-cols-3">
+              <Button
+                className="w-full"
+                onClick={() => void handleFifoCommit()}
+                disabled={fifoBusy || fifoPreview.quantity === 0}
+              >
+                <Upload className="h-4 w-4" />
+                出库并复制 ({fifoPreview.quantity})
+              </Button>
+              <OutboundCopyButton
+                className="w-full"
+                clipboardText={fifoClipboardText}
+                copying={fifoCopying}
+                copied={fifoCopied}
+                onCopy={handleFifoCopy}
+                disabled={fifoBusy}
+              />
+              <Button
+                className="w-full"
+                variant="secondary"
+                onClick={() => void handleFifoDownload()}
+                disabled={fifoBusy || fifoPreview.quantity === 0}
+              >
+                <Download className="h-4 w-4" />
+                出库并下载 TXT
+              </Button>
+            </div>
+
+            <FifoTable
+              rows={fifoPreview.rows}
+              fifoNotesByUsername={fifoNotesByUsername}
+              onFifoNoteChange={updateFifoNote}
+            />
+
+            {fifoMessage && (
+              <p
+                className={cn(
+                  "text-sm",
+                  fifoMessage.includes("失败") ? "text-red-600" : "text-emerald-600"
+                )}
+              >
+                {fifoMessage}
+              </p>
+            )}
+
+            {fifoCopyFailed && fifoClipboardText && (
+              <ClipboardCopyFallback
+                visible
+                text={fifoClipboardText}
+                onRetry={handleFifoCopy}
+                onCopied={acknowledgeFifoCopySuccess}
+              />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
           <CardHeader className="gap-3 p-4 pb-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4 sm:space-y-0 sm:p-6 sm:pb-4">
             <div className="min-w-0">
               <CardTitle className="flex items-center gap-2 text-base">
@@ -1285,133 +1412,6 @@ export default function DashboardPage() {
                 })
               )}
             </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="p-4 pb-3 sm:p-6 sm:pb-4">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Upload className="h-4 w-4 text-primary" />
-              快速 FIFO 出库
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 p-4 pt-0 sm:p-6 sm:pt-0">
-            <div className="flex items-center justify-center gap-3">
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setFifoQuantity((value) => Math.max(0, value - 1))}
-                disabled={fifoQuantity <= 0}
-              >
-                <Minus className="h-4 w-4" />
-              </Button>
-              <input
-                ref={fifoQuantityRef}
-                type="number"
-                value={fifoQuantity}
-                onChange={(event) => setFifoQuantity(Number(event.target.value))}
-                className="h-11 w-24 rounded-[10px] border border-border bg-background px-3 text-center text-xl font-semibold focus:outline-none focus:ring-2 focus:ring-primary/30"
-                min={0}
-              />
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() =>
-                  setFifoQuantity((value) =>
-                    Math.min(fifoPreview.max || value + 1, value + 1)
-                  )
-                }
-                disabled={fifoPreview.max === 0 || fifoQuantity >= fifoPreview.max}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-
-            <div className="flex flex-wrap justify-center gap-2">
-              {fifoChips.map((amount) => (
-                <Button
-                  key={amount}
-                  variant={fifoPreview.quantity === amount ? "primary" : "secondary"}
-                  size="sm"
-                  onClick={() => setFifoQuantity(amount)}
-                >
-                  {amount === fifoPreview.max ? "全部" : amount}
-                </Button>
-              ))}
-            </div>
-
-            <BatchNoteControls
-              rows={fifoNotes.map((entry) => ({
-                clientId: entry.username,
-                username: entry.username,
-                note: entry.note,
-                overwriteNote: entry.overwriteNote,
-              }))}
-              onRowsChange={(rows) =>
-                setFifoNotes(
-                  rows.map((row) => ({
-                    username: row.username ?? "",
-                    note: row.note,
-                    overwriteNote: row.overwriteNote,
-                  }))
-                )
-              }
-              disabled={fifoBusy}
-            />
-
-            <FifoTable
-              rows={fifoPreview.rows}
-              fifoNotesByUsername={fifoNotesByUsername}
-              onFifoNoteChange={updateFifoNote}
-            />
-
-            {fifoMessage && (
-              <p
-                className={cn(
-                  "text-sm",
-                  fifoMessage.includes("失败") ? "text-red-600" : "text-emerald-600"
-                )}
-              >
-                {fifoMessage}
-              </p>
-            )}
-
-            {fifoCopyFailed && fifoClipboardText && (
-              <ClipboardCopyFallback
-                visible
-                text={fifoClipboardText}
-                onRetry={handleFifoCopy}
-                onCopied={acknowledgeFifoCopySuccess}
-              />
-            )}
-
-            <div className="grid gap-2 sm:grid-cols-3">
-              <Button
-                className="w-full"
-                onClick={() => void handleFifoCommit()}
-                disabled={fifoBusy || fifoPreview.quantity === 0}
-              >
-                <Upload className="h-4 w-4" />
-                出库并复制 ({fifoPreview.quantity})
-              </Button>
-              <OutboundCopyButton
-                className="w-full"
-                clipboardText={fifoClipboardText}
-                copying={fifoCopying}
-                copied={fifoCopied}
-                onCopy={handleFifoCopy}
-                disabled={fifoBusy}
-              />
-              <Button
-                className="w-full"
-                variant="secondary"
-                onClick={() => void handleFifoDownload()}
-                disabled={fifoBusy || fifoPreview.quantity === 0}
-              >
-                <Download className="h-4 w-4" />
-                出库并下载 TXT
-              </Button>
             </div>
           </CardContent>
         </Card>

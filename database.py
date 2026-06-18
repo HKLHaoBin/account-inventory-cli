@@ -1628,6 +1628,10 @@ def _compute_balance_before(
 
 
 def _floor_to_bucket(ts: datetime, bucket: str) -> datetime:
+    if bucket == "second":
+        return ts.replace(microsecond=0)
+    if bucket == "minute":
+        return ts.replace(second=0, microsecond=0)
     if bucket == "hour":
         return ts.replace(minute=0, second=0, microsecond=0)
     if bucket == "day":
@@ -1641,6 +1645,10 @@ def _floor_to_bucket(ts: datetime, bucket: str) -> datetime:
 
 
 def _next_bucket(ts: datetime, bucket: str) -> datetime:
+    if bucket == "second":
+        return ts + timedelta(seconds=1)
+    if bucket == "minute":
+        return ts + timedelta(minutes=1)
     if bucket == "hour":
         return ts + timedelta(hours=1)
     if bucket == "day":
@@ -1669,17 +1677,21 @@ def _count_buckets(from_ts: datetime, to_ts: datetime, bucket: str) -> int:
 def resolve_auto_bucket(from_ts: str, to_ts: str) -> str:
     from_dt = _parse_kline_timestamp(from_ts)
     to_dt = _parse_kline_timestamp(to_ts)
-    span_days = (to_dt - from_dt).total_seconds() / 86400
-    if span_days <= 2:
+    span_seconds = (to_dt - from_dt).total_seconds()
+    if span_seconds <= 10 * 60:
+        chosen = "second"
+    elif span_seconds <= 12 * 3600:
+        chosen = "minute"
+    elif span_seconds <= 2 * 86400:
         chosen = "hour"
-    elif span_days <= 120:
+    elif span_seconds <= 120 * 86400:
         chosen = "day"
-    elif span_days <= 730:
+    elif span_seconds <= 730 * 86400:
         chosen = "week"
     else:
         chosen = "month"
 
-    order = ["hour", "day", "week", "month"]
+    order = ["second", "minute", "hour", "day", "week", "month"]
     index = order.index(chosen)
     while index < len(order):
         bucket = order[index]

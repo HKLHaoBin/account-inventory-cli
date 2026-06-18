@@ -2797,6 +2797,22 @@ def test_kline_bucket_boundaries() -> None:
     assert hour["candles"][0]["time"] == "2026-06-07T10:00:00"
     assert hour["candles"][0]["close"] == 1
 
+    second = db.build_history_kline(
+        from_ts="2026-06-07 10:30:45",
+        to_ts="2026-06-07 10:30:47",
+        bucket="second",
+    )
+    assert second["candles"][0]["time"] == "2026-06-07T10:30:45"
+    assert second["candles"][0]["close"] == 1
+
+    minute = db.build_history_kline(
+        from_ts="2026-06-07 10:30:00",
+        to_ts="2026-06-07 10:30:59",
+        bucket="minute",
+    )
+    assert minute["candles"][0]["time"] == "2026-06-07T10:30:00"
+    assert minute["candles"][0]["close"] == 1
+
     day = db.build_history_kline(
         from_ts="2026-06-07 00:00:00",
         to_ts="2026-06-07 23:59:59",
@@ -2817,6 +2833,95 @@ def test_kline_bucket_boundaries() -> None:
         bucket="month",
     )
     assert month["candles"][0]["time"] == "2026-06-01T00:00:00"
+
+
+def test_kline_second() -> None:
+    _reset_inventory()
+    db.insert_account("sec_a", "pw")
+    db.insert_account("sec_b", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:30:45", "sec_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:30:45", "sec_b"),
+        )
+
+    result = db.build_history_kline(
+        from_ts="2026-06-07 10:30:45",
+        to_ts="2026-06-07 10:30:47",
+        bucket="second",
+    )
+    candles = {row["time"]: row for row in result["candles"]}
+
+    assert candles["2026-06-07T10:30:45"]["open"] == 0
+    assert candles["2026-06-07T10:30:45"]["close"] == 2
+    assert candles["2026-06-07T10:30:46"]["open"] == 2
+    assert candles["2026-06-07T10:30:46"]["close"] == 2
+    assert candles["2026-06-07T10:30:47"]["open"] == 2
+    assert candles["2026-06-07T10:30:47"]["close"] == 2
+    assert result["totals"]["inboundCount"] == 2
+    assert result["totals"]["netChange"] == 2
+
+
+def test_kline_minute() -> None:
+    _reset_inventory()
+    db.insert_account("min_a", "pw")
+    db.insert_account("min_b", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:30:10", "min_a"),
+        )
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:30:50", "min_b"),
+        )
+
+    result = db.build_history_kline(
+        from_ts="2026-06-07 10:30:00",
+        to_ts="2026-06-07 10:31:59",
+        bucket="minute",
+    )
+    candles = {row["time"]: row for row in result["candles"]}
+
+    assert candles["2026-06-07T10:30:00"]["open"] == 0
+    assert candles["2026-06-07T10:30:00"]["close"] == 2
+    assert candles["2026-06-07T10:31:00"]["open"] == 2
+    assert candles["2026-06-07T10:31:00"]["close"] == 2
+    assert result["totals"]["inboundCount"] == 2
+    assert result["totals"]["netChange"] == 2
+
+
+def test_kline_auto_short_range() -> None:
+    assert db.resolve_auto_bucket("2026-06-07 10:00:00", "2026-06-07 10:00:09") == "second"
+    assert db.resolve_auto_bucket("2026-06-07 10:00:00", "2026-06-07 10:59:59") == "minute"
+
+    _reset_inventory()
+    db.insert_account("auto_short", "pw")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE inbound_records SET inbound_at = ? WHERE username = ?",
+            ("2026-06-07 10:00:05", "auto_short"),
+        )
+
+    second_result = db.build_history_kline(
+        from_ts="2026-06-07 10:00:00",
+        to_ts="2026-06-07 10:00:09",
+        bucket="auto",
+    )
+    assert second_result["bucket"] == "second"
+    assert second_result["totals"]["inboundCount"] == 1
+
+    minute_result = db.build_history_kline(
+        from_ts="2026-06-07 10:00:00",
+        to_ts="2026-06-07 10:59:59",
+        bucket="auto",
+    )
+    assert minute_result["bucket"] == "minute"
+    assert minute_result["totals"]["inboundCount"] == 1
 
 
 def test_kline_filters_q_and_ranges() -> None:
@@ -3006,7 +3111,7 @@ def test_api_history_kline_stable_shape() -> None:
     default_response = client.get("/api/history/kline")
     assert default_response.status_code == 200
     payload = default_response.json()
-    assert payload["bucket"] in {"hour", "day", "week", "month"}
+    assert payload["bucket"] in {"second", "minute", "hour", "day", "week", "month"}
     assert "from" in payload
     assert "to" in payload
     assert isinstance(payload["candles"], list)
@@ -4207,6 +4312,9 @@ def run_all() -> tuple[int, list[str]]:
         ("kline direct outbound counts only", test_kline_direct_outbound_counts_only),
         ("kline empty bucket continuity", test_kline_empty_bucket_continuity),
         ("kline bucket boundaries", test_kline_bucket_boundaries),
+        ("kline second", test_kline_second),
+        ("kline minute", test_kline_minute),
+        ("kline auto short range", test_kline_auto_short_range),
         ("kline filters q and ranges", test_kline_filters_q_and_ranges),
         ("kline data bounds with data", test_kline_data_bounds_with_data),
         ("kline data bounds empty db", test_kline_data_bounds_empty_db),
