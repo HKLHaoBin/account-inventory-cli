@@ -4660,13 +4660,16 @@ def run_all() -> tuple[int, list[str]]:
             test_cloud_app.test_cloud_load_config_without_token_field,
         ),
         (
-            "cloud proxy requires configuration",
-            test_cloud_app.test_cloud_proxy_requires_configuration,
+            "cloud api dashboard not proxied",
+            test_cloud_app.test_cloud_api_dashboard_is_not_proxied,
         ),
-        ("cloud proxy forwards request", test_cloud_app.test_cloud_proxy_forwards_request),
         (
-            "cloud proxy does not inject token when unconfigured",
-            test_cloud_app.test_cloud_proxy_does_not_inject_token_when_unconfigured,
+            "cloud local credentials endpoint",
+            test_cloud_app.test_cloud_local_credentials_endpoint,
+        ),
+        (
+            "cloud runtime update status local",
+            test_cloud_app.test_cloud_runtime_update_status_is_local,
         ),
         (
             "cloud clipboard ignore local",
@@ -4695,10 +4698,6 @@ def run_all() -> tuple[int, list[str]]:
         (
             "cloud local config with invalid stored url",
             test_cloud_app.test_cloud_local_config_with_invalid_stored_url,
-        ),
-        (
-            "cloud proxy strips encoding headers",
-            test_cloud_app.test_cloud_proxy_strips_encoding_headers,
         ),
         (
             "cloud packaged frontend static path",

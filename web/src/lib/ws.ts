@@ -1,6 +1,9 @@
 import type { ClipboardMessage } from "@/types/account";
 
 export function getClipboardWsUrl(): string {
+  // When the UI is opened via a non-localhost hostname (e.g. LAN IP), set
+  // NEXT_PUBLIC_WS_URL=ws://127.0.0.1:8000/ws/clipboard to reach the local
+  // cloud client listener instead of the browser host.
   if (process.env.NEXT_PUBLIC_WS_URL) return process.env.NEXT_PUBLIC_WS_URL;
   if (typeof window === "undefined") return "ws://127.0.0.1:8000/ws/clipboard";
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";

@@ -39,8 +39,11 @@ import {
 } from "@/lib/outbound-clipboard-guard";
 import { readHttpErrorDetail } from "@/lib/http-error";
 import { ClipboardCopyError, copyToClipboard } from "@/lib/clipboard";
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+import { fetchLocalCredentials } from "@/lib/local-config";
+import {
+  resolveRequestTarget,
+  resolveRequestUrl,
+} from "@/lib/request-routing";
 
 export const DEFAULT_PAGE_SIZE = 50;
 
@@ -88,12 +91,22 @@ async function requestJson<T>(
   path: string,
   options?: RequestInit
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const url = await resolveRequestUrl(path);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(options?.headers as Record<string, string> | undefined),
+  };
+
+  if (resolveRequestTarget(path) === "remote") {
+    const credentials = await fetchLocalCredentials();
+    if (credentials?.remoteAccessToken) {
+      headers["X-Remote-Access-Token"] = credentials.remoteAccessToken;
+    }
+  }
+
+  const response = await fetch(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
+    headers,
   });
 
   if (!response.ok) {

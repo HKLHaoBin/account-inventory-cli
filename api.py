@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -25,12 +26,21 @@ CommitStatus = Literal["success", "error", "warning", "skipped"]
 
 app = FastAPI(title="Account Inventory API")
 install_remote_access(app)
+_default_cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+_extra_cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_default_cors_origins + _extra_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,7 +1,9 @@
 """Cloud-mode local client entry point.
 
-Provides embedded static frontend, clipboard watching, and API proxying to a
-configured remote backend. Does not initialize or write local SQLite databases.
+Provides embedded static frontend, clipboard watching, local config/credentials,
+and runtime update endpoints. Business API requests are made directly from the
+browser to the configured remote backend. Does not initialize or write local
+SQLite databases.
 """
 
 from __future__ import annotations
@@ -15,12 +17,11 @@ import time
 import webbrowser
 from pathlib import Path
 
-import httpx
 import requests
+import updater_runtime
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
 from pydantic import BaseModel
 
 import clipboard
@@ -31,22 +32,6 @@ from remote_access import (
     ensure_remote_access_websocket,
     install_remote_access,
 )
-
-HOP_BY_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
-
-PROXY_SKIP_REQUEST_HEADERS = HOP_BY_HOP_HEADERS | {"accept-encoding"}
-PROXY_SKIP_RESPONSE_HEADERS = HOP_BY_HOP_HEADERS | {"content-encoding"}
 
 _ignored_clipboard_text: str | None = None
 
@@ -80,6 +65,12 @@ class CloudConfigPayload(BaseModel):
     remoteAccessTokenConfigured: bool
 
 
+class LocalCredentialsPayload(BaseModel):
+    remoteAccessToken: str | None
+    cloudApiBaseUrl: str | None
+    configured: bool
+
+
 class CloudConfigUpdateRequest(BaseModel):
     cloudApiBaseUrl: str = ""
     remoteAccessToken: str | None = None
@@ -98,28 +89,23 @@ def _config_payload(config: CloudConfig | None = None) -> CloudConfigPayload:
     )
 
 
-def _forward_headers(request: Request) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for key, value in request.headers.items():
-        lowered = key.lower()
-        if lowered in PROXY_SKIP_REQUEST_HEADERS:
-            continue
-        headers[key] = value
-    return headers
-
-
-def _response_headers(headers: httpx.Headers) -> dict[str, str]:
-    forwarded: dict[str, str] = {}
-    for key, value in headers.items():
-        if key.lower() in PROXY_SKIP_RESPONSE_HEADERS:
-            continue
-        forwarded[key] = value
-    return forwarded
+def _credentials_payload(config: CloudConfig | None = None) -> LocalCredentialsPayload:
+    current = config or load_config()
+    return LocalCredentialsPayload(
+        remoteAccessToken=current.remote_access_token,
+        cloudApiBaseUrl=current.cloud_api_base_url,
+        configured=current.configured,
+    )
 
 
 @app.get("/local/config", response_model=CloudConfigPayload)
 def get_local_config() -> CloudConfigPayload:
     return _config_payload()
+
+
+@app.get("/local/credentials", response_model=LocalCredentialsPayload)
+def get_local_credentials() -> LocalCredentialsPayload:
+    return _credentials_payload()
 
 
 @app.put("/local/config", response_model=CloudConfigPayload)
@@ -183,41 +169,19 @@ async def clipboard_socket(websocket: WebSocket) -> None:
         return
 
 
-@app.api_route(
-    "/api/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-)
-async def proxy_api(request: Request, path: str) -> Response:
-    config = load_config()
-    if not config.configured or not config.cloud_api_base_url:
-        raise HTTPException(status_code=428, detail="请先配置数据库服务地址")
+@app.get("/api/runtime/update-status")
+def get_update_status() -> dict[str, object]:
+    return updater_runtime.read_update_status()
 
-    target = f"{config.cloud_api_base_url}/api/{path}"
-    if request.url.query:
-        target = f"{target}?{request.url.query}"
 
-    body = await request.body()
-    headers = _forward_headers(request)
-    if config.remote_access_token:
-        headers[REMOTE_ACCESS_HEADER] = config.remote_access_token
+@app.post("/api/runtime/check-update")
+def check_update() -> dict[str, object]:
+    return updater_runtime.check_latest_update()
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-            upstream = await client.request(
-                request.method,
-                target,
-                content=body,
-                headers=headers,
-            )
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail=f"无法连接云端服务：{exc}") from exc
 
-    return Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
-        headers=_response_headers(upstream.headers),
-        media_type=upstream.headers.get("content-type"),
-    )
+@app.post("/api/runtime/trigger-update")
+def trigger_update(x_update_token: str | None = Header(default=None)) -> dict[str, object]:
+    return updater_runtime.trigger_update(x_update_token)
 
 
 def _browser_host(host: str) -> str:

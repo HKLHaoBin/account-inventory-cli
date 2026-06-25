@@ -6,6 +6,14 @@ export interface LocalConfigPayload {
   remoteAccessTokenConfigured: boolean;
 }
 
+export interface LocalCredentialsPayload {
+  remoteAccessToken: string | null;
+  cloudApiBaseUrl: string | null;
+  configured: boolean;
+}
+
+let credentialsCache: LocalCredentialsPayload | null | undefined;
+
 async function requestLocalJson<T>(
   path: string,
   options?: RequestInit
@@ -39,6 +47,29 @@ export async function fetchLocalConfig(): Promise<LocalConfigPayload | null> {
     }
     throw error;
   }
+}
+
+export async function fetchLocalCredentials(): Promise<LocalCredentialsPayload | null> {
+  if (credentialsCache !== undefined) {
+    return credentialsCache;
+  }
+
+  try {
+    credentialsCache = await requestLocalJson<LocalCredentialsPayload>(
+      "/local/credentials"
+    );
+    return credentialsCache;
+  } catch (error) {
+    if (error instanceof Error && error.message === "NOT_FOUND") {
+      credentialsCache = null;
+      return null;
+    }
+    throw error;
+  }
+}
+
+export function invalidateLocalCredentialsCache(): void {
+  credentialsCache = undefined;
 }
 
 export function saveLocalConfig(

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchLocalConfig,
+  fetchLocalCredentials,
+  invalidateLocalCredentialsCache,
   saveLocalConfig,
   testLocalConfig,
 } from "./local-config";
@@ -8,6 +10,7 @@ import {
 describe("local-config client", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    invalidateLocalCredentialsCache();
   });
 
   it("returns null when /local/config is unavailable", async () => {
@@ -108,6 +111,45 @@ describe("local-config client", () => {
         body: JSON.stringify({
           cloudApiBaseUrl: "https://cloud.example",
           remoteAccessToken: "remote-secret",
+        }),
+      })
+    );
+  });
+
+  it("returns null when /local/credentials is unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: async () => "Not Found",
+      })
+    );
+
+    await expect(fetchLocalCredentials()).resolves.toBeNull();
+  });
+
+  it("loads local credentials payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        remoteAccessToken: "remote-secret",
+        cloudApiBaseUrl: "https://cloud.example",
+        configured: true,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchLocalCredentials()).resolves.toEqual({
+      remoteAccessToken: "remote-secret",
+      cloudApiBaseUrl: "https://cloud.example",
+      configured: true,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/local/credentials",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
         }),
       })
     );

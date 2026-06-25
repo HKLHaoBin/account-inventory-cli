@@ -7,8 +7,6 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-import httpx
-
 import cloud_app
 import cloud_config
 
@@ -101,18 +99,7 @@ def test_cloud_load_config_without_token_field() -> None:
             assert loaded.remote_access_token is None
 
 
-def test_cloud_proxy_requires_configuration() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        with _patch_config_dir(Path(tmp)):
-            from fastapi.testclient import TestClient
-
-            client = TestClient(cloud_app.app)
-            response = client.get("/api/dashboard")
-            assert response.status_code == 428
-            assert "请先配置数据库服务地址" in response.text
-
-
-def test_cloud_proxy_forwards_request() -> None:
+def test_cloud_api_dashboard_is_not_proxied() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config_dir = Path(tmp)
         with _patch_config_dir(config_dir):
@@ -121,99 +108,58 @@ def test_cloud_proxy_forwards_request() -> None:
                 remote_access_token="remote-secret",
             )
 
-            fake_response = httpx.Response(
-                200,
-                json={"inventoryCount": 3},
-                headers={"content-type": "application/json"},
+            from fastapi.testclient import TestClient
+
+            client = TestClient(cloud_app.app)
+            response = client.get("/api/dashboard")
+            assert response.status_code == 404
+
+
+def test_cloud_local_credentials_endpoint() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        config_dir = Path(tmp)
+        with _patch_config_dir(config_dir):
+            cloud_config.save_config(
+                "https://cloud.example",
+                remote_access_token="remote-secret",
             )
-            fake_client = mock.AsyncMock()
-            fake_client.request = mock.AsyncMock(return_value=fake_response)
-            fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
-            fake_client.__aexit__ = mock.AsyncMock(return_value=None)
 
             from fastapi.testclient import TestClient
 
-            with mock.patch("cloud_app.httpx.AsyncClient", return_value=fake_client):
-                client = TestClient(cloud_app.app)
-                response = client.post(
-                    "/api/inbound/preview?dry=1",
-                    json={"text": "user----pass"},
-                )
-
+            client = TestClient(cloud_app.app)
+            response = client.get("/local/credentials")
             assert response.status_code == 200
-            assert response.json()["inventoryCount"] == 3
-            fake_client.request.assert_awaited_once()
-            call = fake_client.request.await_args
-            assert call.args[0] == "POST"
-            assert call.args[1] == "https://cloud.example/api/inbound/preview?dry=1"
-            assert b"user----pass" in call.kwargs["content"]
-            forwarded_headers = {
-                key.lower(): value for key, value in call.kwargs["headers"].items()
+            assert response.json() == {
+                "remoteAccessToken": "remote-secret",
+                "cloudApiBaseUrl": "https://cloud.example",
+                "configured": True,
             }
-            assert forwarded_headers["x-remote-access-token"] == "remote-secret"
+
+            config_response = client.get("/local/config")
+            assert config_response.status_code == 200
+            config_body = config_response.json()
+            assert "remoteAccessToken" not in config_body
+            assert "remote-secret" not in config_response.text
 
 
-def test_cloud_proxy_forwards_put_request() -> None:
+def test_cloud_runtime_update_status_is_local() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config_dir = Path(tmp)
         with _patch_config_dir(config_dir):
             cloud_config.save_config("https://cloud.example")
 
-            fake_response = httpx.Response(
-                200,
-                json={"groups": [], "databases": []},
-                headers={"content-type": "application/json"},
-            )
-            fake_client = mock.AsyncMock()
-            fake_client.request = mock.AsyncMock(return_value=fake_response)
-            fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
-            fake_client.__aexit__ = mock.AsyncMock(return_value=None)
-
             from fastapi.testclient import TestClient
 
-            with mock.patch("cloud_app.httpx.AsyncClient", return_value=fake_client):
+            with mock.patch(
+                "cloud_app.updater_runtime.read_update_status",
+                return_value={"state": "idle", "phase": "idle"},
+            ) as read_status:
                 client = TestClient(cloud_app.app)
-                response = client.put(
-                    "/api/database-groups",
-                    json={"groups": [{"id": "g1", "name": "组 1", "databaseIds": []}]},
-                )
+                response = client.get("/api/runtime/update-status")
 
             assert response.status_code == 200
-            assert response.json()["groups"] == []
-            fake_client.request.assert_awaited_once()
-            call = fake_client.request.await_args
-            assert call.args[0] == "PUT"
-            assert call.args[1] == "https://cloud.example/api/database-groups"
-
-
-def test_cloud_proxy_does_not_inject_token_when_unconfigured() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        config_dir = Path(tmp)
-        with _patch_config_dir(config_dir):
-            cloud_config.save_config("https://cloud.example")
-
-            fake_response = httpx.Response(
-                200,
-                json={"inventoryCount": 3},
-                headers={"content-type": "application/json"},
-            )
-            fake_client = mock.AsyncMock()
-            fake_client.request = mock.AsyncMock(return_value=fake_response)
-            fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
-            fake_client.__aexit__ = mock.AsyncMock(return_value=None)
-
-            from fastapi.testclient import TestClient
-
-            with mock.patch("cloud_app.httpx.AsyncClient", return_value=fake_client):
-                client = TestClient(cloud_app.app)
-                response = client.get("/api/dashboard")
-
-            assert response.status_code == 200
-            call = fake_client.request.await_args
-            forwarded_headers = {
-                key.lower(): value for key, value in call.kwargs["headers"].items()
-            }
-            assert "x-remote-access-token" not in forwarded_headers
+            assert response.json() == {"state": "idle", "phase": "idle"}
+            read_status.assert_called_once()
 
 
 def test_cloud_clipboard_ignore_is_local() -> None:
@@ -221,22 +167,15 @@ def test_cloud_clipboard_ignore_is_local() -> None:
         with _patch_config_dir(Path(tmp)):
             from fastapi.testclient import TestClient
 
-            fake_client = mock.AsyncMock()
-            fake_client.request = mock.AsyncMock()
-            fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
-            fake_client.__aexit__ = mock.AsyncMock(return_value=None)
-
-            with mock.patch("cloud_app.httpx.AsyncClient", return_value=fake_client):
-                client = TestClient(cloud_app.app)
-                response = client.post(
-                    "/api/clipboard/ignore",
-                    json={"text": "skip----pw"},
-                )
+            client = TestClient(cloud_app.app)
+            response = client.post(
+                "/api/clipboard/ignore",
+                json={"text": "skip----pw"},
+            )
 
             assert response.status_code == 200
             assert response.json()["ok"] is True
             assert cloud_app._ignored_clipboard_text == "skip----pw"
-            fake_client.request.assert_not_awaited()
 
 
 def test_cloud_local_config_endpoints() -> None:
@@ -370,51 +309,6 @@ def test_cloud_local_config_with_invalid_stored_url() -> None:
                 "configured": False,
                 "remoteAccessTokenConfigured": False,
             }
-
-
-def test_cloud_proxy_strips_encoding_headers() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        config_dir = Path(tmp)
-        with _patch_config_dir(config_dir):
-            cloud_config.save_config(
-                "https://cloud.example",
-                remote_access_token="remote-secret",
-            )
-
-            fake_response = mock.Mock()
-            fake_response.status_code = 200
-            fake_response.content = b'{"ok": true}'
-            fake_response.headers = httpx.Headers(
-                {
-                    "content-type": "application/json",
-                    "content-encoding": "gzip",
-                }
-            )
-            fake_client = mock.AsyncMock()
-            fake_client.request = mock.AsyncMock(return_value=fake_response)
-            fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
-            fake_client.__aexit__ = mock.AsyncMock(return_value=None)
-
-            from fastapi.testclient import TestClient
-
-            with mock.patch("cloud_app.httpx.AsyncClient", return_value=fake_client):
-                client = TestClient(
-                    cloud_app.app,
-                    headers={"Accept-Encoding": "gzip, deflate, br"},
-                )
-                response = client.get("/api/dashboard")
-
-            assert response.status_code == 200
-            assert response.json() == {"ok": True}
-            assert "content-encoding" not in {
-                key.lower() for key in response.headers.keys()
-            }
-
-            call = fake_client.request.await_args
-            forwarded_headers = {
-                key.lower(): value for key, value in call.kwargs["headers"].items()
-            }
-            assert "accept-encoding" not in forwarded_headers
 
 
 def test_cloud_packaged_frontend_static_path() -> None:

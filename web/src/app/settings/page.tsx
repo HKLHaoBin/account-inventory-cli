@@ -44,6 +44,7 @@ import { emitDatabaseChanged, subscribeDatabaseChanged } from "@/lib/database-ev
 import { generateId } from "@/lib/id";
 import {
   fetchLocalConfig,
+  invalidateLocalCredentialsCache,
   saveLocalConfig,
   testLocalConfig,
 } from "@/lib/local-config";
@@ -517,6 +518,7 @@ export default function SettingsPage() {
       setCloudRemoteAccessTokenDirty(false);
       setCloudConfigError("");
       setCloudConfigMessage("服务地址已保存");
+      invalidateLocalCredentialsCache();
     } catch (error) {
       setCloudConfigMessage("");
       setCloudConfigError(
@@ -542,6 +544,7 @@ export default function SettingsPage() {
       setCloudRemoteAccessTokenConfigured(payload.remoteAccessTokenConfigured);
       setCloudConfigError("");
       setCloudConfigMessage("远端访问令牌已清空");
+      invalidateLocalCredentialsCache();
     } catch (error) {
       setCloudConfigMessage("");
       setCloudConfigError(
@@ -575,6 +578,7 @@ export default function SettingsPage() {
       } else {
         setCloudConfigured(true);
       }
+      invalidateLocalCredentialsCache();
       setCloudConfigError("");
       setCloudConfigMessage("连接测试成功");
     } catch (error) {
