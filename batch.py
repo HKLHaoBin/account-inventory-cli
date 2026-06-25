@@ -57,7 +57,7 @@ def classify_inbound_line(
         return InboundFailure(line=line, reason=str(exc))
 
     if exists_in_inventory(username):
-        return InboundFailure(line=line, reason=f"账号 {username} 已在库存中")
+        return InboundFailure(line=line, reason=f"账号 {username} 已在组内库存中")
 
     if username in seen_usernames:
         return InboundFailure(line=line, reason="本批次内账号重复")

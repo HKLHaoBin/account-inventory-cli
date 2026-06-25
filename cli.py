@@ -238,7 +238,9 @@ def _review_pending(pending: list[InboundPending]) -> tuple[int, list[InboundFai
     keyboard = console_input.keyboard_supported()
 
     while pending:
-        outbound_times = db.get_latest_outbound_times([item.username for item in pending])
+        outbound_times = db.get_latest_outbound_times_for_group(
+            [item.username for item in pending]
+        )
         _render_pending_interactive(
             pending,
             cursor,
@@ -350,8 +352,8 @@ def _process_inbound_batch(lines: list[str]) -> None:
         except ValueError:
             continue
 
-    inventory_exists = db.exists_in_inventory_many(parsed_usernames)
-    outbound_exists = db.exists_in_outbound_many(parsed_usernames)
+    inventory_exists = db.exists_in_inventory_many_for_group(parsed_usernames)
+    outbound_exists = db.exists_in_outbound_many_for_group(parsed_usernames)
 
     def exists_in_inventory(username: str) -> bool:
         return username in inventory_exists

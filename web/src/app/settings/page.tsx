@@ -8,10 +8,12 @@ import {
   Copy,
   Database,
   DownloadCloud,
+  FolderTree,
   Globe,
   Keyboard,
   Monitor,
   Moon,
+  Plus,
   RefreshCw,
   Scissors,
   ShieldCheck,
@@ -30,9 +32,11 @@ import {
   deleteDatabase,
   deleteSeparatorRule,
   fetchDashboard,
+  fetchDatabaseGroups,
   fetchSeparatorRules,
   fetchUpdateStatus,
   renameDatabase,
+  saveDatabaseGroups,
   triggerUpdate,
   updateSeparatorRule,
 } from "@/lib/api";
@@ -46,7 +50,12 @@ import {
   emitSeparatorRulesChanged,
   subscribeSeparatorRulesChanged,
 } from "@/lib/separator-rules-events";
-import type { DatabaseInfo, SeparatorRule, UpdateStatusPayload } from "@/types/account";
+import type {
+  DatabaseGroup,
+  DatabaseInfo,
+  SeparatorRule,
+  UpdateStatusPayload,
+} from "@/types/account";
 
 function statusTone(state?: string) {
   if (state === "updated" || state === "idle") return "text-emerald-600";
@@ -106,6 +115,11 @@ export default function SettingsPage() {
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneName, setCloneName] = useState("");
   const [cloningDatabase, setCloningDatabase] = useState(false);
+  const [databaseGroups, setDatabaseGroups] = useState<DatabaseGroup[]>([]);
+  const [groupDatabases, setGroupDatabases] = useState<DatabaseInfo[]>([]);
+  const [groupsError, setGroupsError] = useState("");
+  const [groupsDirty, setGroupsDirty] = useState(false);
+  const [savingGroups, setSavingGroups] = useState(false);
   const [separatorRules, setSeparatorRules] = useState<SeparatorRule[]>([]);
   const [separatorRulesError, setSeparatorRulesError] = useState("");
   const [newRuleName, setNewRuleName] = useState("");
@@ -144,6 +158,20 @@ export default function SettingsPage() {
       setDatabaseError("");
     } catch (error) {
       setDatabaseError(error instanceof Error ? error.message : "数据库状态读取失败");
+    }
+  }, []);
+
+  const refreshDatabaseGroups = useCallback(async () => {
+    try {
+      const payload = await fetchDatabaseGroups();
+      setDatabaseGroups(payload.groups);
+      setGroupDatabases(payload.databases);
+      setGroupsError("");
+      setGroupsDirty(false);
+    } catch (error) {
+      setGroupsError(
+        error instanceof Error ? error.message : "数据库组配置读取失败"
+      );
     }
   }, []);
 
@@ -187,21 +215,23 @@ export default function SettingsPage() {
       void refreshLocalConfig();
       void refreshUpdateStatus();
       void refreshDatabase();
+      void refreshDatabaseGroups();
       void refreshSeparatorRules();
     }, 0);
     return () => {
       window.clearTimeout(mountTimer);
       window.clearTimeout(statusTimer);
     };
-  }, [refreshDatabase, refreshLocalConfig, refreshSeparatorRules, refreshUpdateStatus]);
+  }, [refreshDatabase, refreshDatabaseGroups, refreshLocalConfig, refreshSeparatorRules, refreshUpdateStatus]);
 
   useEffect(
     () =>
       subscribeDatabaseChanged(() => {
         void refreshDatabase();
+        void refreshDatabaseGroups();
         void refreshSeparatorRules();
       }),
-    [refreshDatabase, refreshSeparatorRules]
+    [refreshDatabase, refreshDatabaseGroups, refreshSeparatorRules]
   );
 
   useEffect(
@@ -226,6 +256,85 @@ export default function SettingsPage() {
     if (updateStatus?.state !== "error" || !updateStatus.github_rate_limit_reset_at) return "";
     return `GitHub API 暂时限流，重置时间：${updateStatus.github_rate_limit_reset_at}。请稍后重试；高级用户可配置 UPDATER_GITHUB_TOKEN。`;
   }, [updateStatus]);
+
+  const assignedDatabaseIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const group of databaseGroups) {
+      for (const databaseId of group.databaseIds) {
+        ids.add(databaseId);
+      }
+    }
+    return ids;
+  }, [databaseGroups]);
+
+  const unassignedDatabases = useMemo(
+    () => groupDatabases.filter((item) => !assignedDatabaseIds.has(item.id)),
+    [assignedDatabaseIds, groupDatabases]
+  );
+
+  function createDatabaseGroup() {
+    const nextIndex = databaseGroups.length + 1;
+    setDatabaseGroups((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        name: `组 ${nextIndex}`,
+        databaseIds: [],
+      },
+    ]);
+    setGroupsDirty(true);
+    setGroupsError("");
+  }
+
+  function renameDatabaseGroup(groupId: string, name: string) {
+    setDatabaseGroups((current) =>
+      current.map((group) =>
+        group.id === groupId ? { ...group, name: name.trim() || group.name } : group
+      )
+    );
+    setGroupsDirty(true);
+  }
+
+  function deleteDatabaseGroup(groupId: string) {
+    setDatabaseGroups((current) => current.filter((group) => group.id !== groupId));
+    setGroupsDirty(true);
+  }
+
+  function assignDatabaseToGroup(databaseId: string, groupId: string | null) {
+    setDatabaseGroups((current) =>
+      current.map((group) => {
+        const without = group.databaseIds.filter((id) => id !== databaseId);
+        if (groupId && group.id === groupId) {
+          return { ...group, databaseIds: [...without, databaseId] };
+        }
+        return { ...group, databaseIds: without };
+      })
+    );
+    setGroupsDirty(true);
+  }
+
+  function groupForDatabase(databaseId: string): string {
+    return (
+      databaseGroups.find((group) => group.databaseIds.includes(databaseId))?.id ??
+      ""
+    );
+  }
+
+  async function handleSaveDatabaseGroups() {
+    setSavingGroups(true);
+    try {
+      const payload = await saveDatabaseGroups(databaseGroups);
+      setDatabaseGroups(payload.groups);
+      setGroupDatabases(payload.databases);
+      setGroupsError("");
+      setGroupsDirty(false);
+      emitDatabaseChanged();
+    } catch (error) {
+      setGroupsError(error instanceof Error ? error.message : "数据库组保存失败");
+    } finally {
+      setSavingGroups(false);
+    }
+  }
 
   async function handleCheckUpdate() {
     setChecking(true);
@@ -800,6 +909,144 @@ export default function SettingsPage() {
               删除后会自动切换到其他数据库；若没有剩余数据库，会创建新的空默认数据库。
             </p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <FolderTree className="h-4 w-4" />
+            数据库组
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            同组内的数据库在入库时会互相比对库存与出库记录；未分配的数据库仅与自身比对。
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" size="sm" onClick={() => void refreshDatabaseGroups()}>
+              <RefreshCw className="h-4 w-4" />
+              刷新
+            </Button>
+            <Button variant="secondary" size="sm" onClick={createDatabaseGroup}>
+              <Plus className="h-4 w-4" />
+              新建组
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void handleSaveDatabaseGroups()}
+              disabled={!groupsDirty || savingGroups}
+            >
+              {savingGroups ? "保存中…" : "保存组配置"}
+            </Button>
+          </div>
+
+          {databaseGroups.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+              尚未创建数据库组。所有数据库均为独立组（仅自身比对）。
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {databaseGroups.map((group) => (
+                <div
+                  key={group.id}
+                  className="rounded-xl border border-border bg-muted/20 p-4 space-y-3"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      value={group.name}
+                      onChange={(event) =>
+                        renameDatabaseGroup(group.id, event.target.value)
+                      }
+                      className="max-w-xs"
+                      placeholder="组名称"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => deleteDatabaseGroup(group.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      删除组
+                    </Button>
+                  </div>
+                  <div className="space-y-2">
+                    {group.databaseIds.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">暂无数据库，请从下方独立组分配。</p>
+                    ) : (
+                      group.databaseIds.map((databaseId) => {
+                        const info = groupDatabases.find((item) => item.id === databaseId);
+                        return (
+                          <div
+                            key={databaseId}
+                            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm"
+                          >
+                            <span className="font-medium">{info?.name ?? databaseId}</span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => assignDatabaseToGroup(databaseId, null)}
+                            >
+                              移出组
+                            </Button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-2 border-t border-border pt-4">
+            <p className="text-sm font-medium">独立组（仅自身比对）</p>
+            {groupDatabases.length === 0 ? (
+              <p className="text-sm text-muted-foreground">加载数据库列表中…</p>
+            ) : unassignedDatabases.length === 0 ? (
+              <p className="text-sm text-muted-foreground">所有数据库均已分配到组。</p>
+            ) : (
+              <div className="space-y-2">
+                {unassignedDatabases.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm"
+                  >
+                    <div>
+                      <p className="font-medium">{item.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        库存 {item.inventoryCount}
+                      </p>
+                    </div>
+                    {databaseGroups.length > 0 && (
+                      <select
+                        className="h-9 rounded-lg border border-border bg-background px-3 text-sm"
+                        value={groupForDatabase(item.id)}
+                        onChange={(event) => {
+                          const groupId = event.target.value;
+                          if (groupId) assignDatabaseToGroup(item.id, groupId);
+                        }}
+                      >
+                        <option value="">分配到组…</option>
+                        {databaseGroups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {group.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {groupsError && (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              {groupsError}
+            </div>
+          )}
         </CardContent>
       </Card>
 

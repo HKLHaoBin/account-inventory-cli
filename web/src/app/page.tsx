@@ -43,6 +43,11 @@ import { clipboardLoadedStatus, getClipboardWsUrl, isClipboardMessage } from "@/
 import { parseAccountLine, parseLines } from "@/lib/parser";
 import { useSeparatorRules } from "@/lib/use-separator-rules";
 import { cn, formatDateTime, formatRelativeTime, maskValue } from "@/lib/utils";
+import {
+  AccountColumnHeader,
+  AccountFieldCell,
+  FIFO_PREVIEW_COLUMNS,
+} from "@/lib/account-columns";
 import type {
   Account,
   ActivityItem,
@@ -215,10 +220,26 @@ function FifoTable({
               )}
             </div>
             <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-              <p className="font-mono">密码 {maskValue(account.password)}</p>
-              <p className="whitespace-nowrap">
-                入库 {formatDateTime(account.inboundAt)}
-              </p>
+              <AccountFieldCell
+                column={FIFO_PREVIEW_COLUMNS[1]}
+                record={account}
+              />
+              <AccountFieldCell
+                column={FIFO_PREVIEW_COLUMNS[2]}
+                record={account}
+              />
+              <AccountFieldCell
+                column={FIFO_PREVIEW_COLUMNS[3]}
+                record={account}
+              />
+              <AccountFieldCell
+                column={FIFO_PREVIEW_COLUMNS[4]}
+                record={account}
+              />
+              <AccountFieldCell
+                column={FIFO_PREVIEW_COLUMNS[5]}
+                record={account}
+              />
             </div>
             {showNotes && (
               <OutboundNoteField
@@ -259,12 +280,17 @@ function FifoTable({
           <thead>
             <tr className="border-b border-border bg-muted/40">
               <th className="px-3 py-2.5 text-left font-medium">#</th>
-              <th className="px-3 py-2.5 text-left font-medium">账号</th>
-              <th className="px-3 py-2.5 text-left font-medium">密码</th>
-              <th className="px-3 py-2.5 text-left font-medium">入库时间</th>
-              {showNotes && (
-                <th className="px-3 py-2.5 text-left font-medium">备注</th>
-              )}
+              {FIFO_PREVIEW_COLUMNS.map((column) => (
+                <AccountColumnHeader
+                  key={column.key}
+                  column={column}
+                  className={
+                    column.key === "note" && !showNotes
+                      ? "hidden"
+                      : "px-3 py-2.5 text-left font-medium"
+                  }
+                />
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -281,38 +307,42 @@ function FifoTable({
                   </span>
                 </td>
                 <td className="px-3 py-2.5 font-mono">{account.username}</td>
-                <td className="px-3 py-2.5 font-mono text-xs">
-                  {maskValue(account.password)}
-                </td>
-                <td className="px-3 py-2.5 text-xs text-muted-foreground whitespace-nowrap">
-                  {formatDateTime(account.inboundAt)}
-                </td>
-                {showNotes && (
-                  <td className="min-w-[140px] px-3 py-2.5">
-                    <OutboundNoteField
-                      existingNote={account.note}
-                      value={
-                        fifoNotesByUsername?.[account.username]?.note ??
-                        account.note ??
-                        ""
-                      }
-                      onChange={(note) =>
-                        onFifoNoteChange?.(account.username, {
-                          note,
-                          overwriteNote: false,
-                        })
-                      }
-                      overwriteNote={
-                        fifoNotesByUsername?.[account.username]?.overwriteNote ??
-                        false
-                      }
-                      onOverwriteNoteChange={(overwriteNote) =>
-                        onFifoNoteChange?.(account.username, { overwriteNote })
-                      }
-                      inputClassName="h-8 text-xs"
-                    />
-                  </td>
-                )}
+                {FIFO_PREVIEW_COLUMNS.slice(1).map((column) => {
+                  if (column.key === "note") {
+                    if (!showNotes) return null;
+                    return (
+                      <td key={column.key} className="min-w-[140px] px-3 py-2.5">
+                        <OutboundNoteField
+                          existingNote={account.note}
+                          value={
+                            fifoNotesByUsername?.[account.username]?.note ??
+                            account.note ??
+                            ""
+                          }
+                          onChange={(note) =>
+                            onFifoNoteChange?.(account.username, {
+                              note,
+                              overwriteNote: false,
+                            })
+                          }
+                          overwriteNote={
+                            fifoNotesByUsername?.[account.username]?.overwriteNote ??
+                            false
+                          }
+                          onOverwriteNoteChange={(overwriteNote) =>
+                            onFifoNoteChange?.(account.username, { overwriteNote })
+                          }
+                          inputClassName="h-8 text-xs"
+                        />
+                      </td>
+                    );
+                  }
+                  return (
+                    <td key={column.key} className="px-3 py-2.5">
+                      <AccountFieldCell column={column} record={account} />
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -1187,6 +1217,7 @@ export default function DashboardPage() {
                     <th className="px-3 py-2.5 text-left font-medium">账号</th>
                     <th className="px-3 py-2.5 text-left font-medium">密码</th>
                     <th className="px-3 py-2.5 text-left font-medium">邮箱</th>
+                    <th className="px-3 py-2.5 text-left font-medium">邮箱密码</th>
                     <th className="px-3 py-2.5 text-left font-medium">网址</th>
                     <th className="px-3 py-2.5 text-left font-medium">备注</th>
                     <th className="px-3 py-2.5 text-left font-medium">信息</th>
@@ -1196,7 +1227,7 @@ export default function DashboardPage() {
                 <tbody>
                   {filteredRows.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
+                      <td colSpan={10} className="px-3 py-8 text-center text-muted-foreground">
                         输入账号文本后会自动转换为表格
                       </td>
                     </tr>
@@ -1253,6 +1284,9 @@ export default function DashboardPage() {
                           </td>
                           <td className="px-3 py-2.5">
                             <AccountCell value={row.email} />
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <AccountCell value={row.emailPassword} />
                           </td>
                           <td className="max-w-[180px] truncate px-3 py-2.5">
                             <AccountCell value={row.url} />

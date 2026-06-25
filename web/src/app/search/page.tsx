@@ -6,7 +6,6 @@ import { Copy, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { PasswordField } from "@/components/ui/password-field";
 import { Pagination } from "@/components/ui/pagination";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyPanel } from "@/components/clipboard/outbound-copy-panel";
@@ -17,10 +16,16 @@ import {
   outboundByUsername,
   searchAccounts,
 } from "@/lib/api";
+import {
+  AccountFieldCell,
+  STANDARD_ACCOUNT_DATA_COLUMNS,
+  searchResultTimestamp,
+  searchSourceBadge,
+} from "@/lib/account-columns";
 import { runAppClipboardCopy } from "@/lib/clipboard-actions";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { formatAccountLine, formatDateTime } from "@/lib/utils";
-import type { SearchResult } from "@/types/account";
+import type { SearchResult, SearchSource } from "@/types/account";
 
 function highlight(text: string, query: string) {
   const idx = text.toLowerCase().indexOf(query.toLowerCase());
@@ -39,14 +44,15 @@ function highlight(text: string, query: string) {
 function SearchContent() {
   const searchParams = useSearchParams();
   const query = searchParams.get("q") || "";
-  const [tab, setTab] = useState<"all" | "inventory" | "history">("all");
+  const [tab, setTab] = useState<SearchSource>("all");
   const [page, setPage] = useState(1);
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [inventoryTotal, setInventoryTotal] = useState(0);
-  const [historyTotal, setHistoryTotal] = useState(0);
+  const [outboundTotal, setOutboundTotal] = useState(0);
+  const [inboundTotal, setInboundTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [outboundUsername, setOutboundUsername] = useState("");
@@ -67,15 +73,14 @@ function SearchContent() {
   const [reloadToken, setReloadToken] = useState(0);
   const lastQueryRef = useRef(query);
 
-  const allTotal = inventoryTotal + historyTotal;
+  const allTotal = inventoryTotal + outboundTotal + inboundTotal;
   const inventoryResults = results.filter((r) => r.source === "inventory");
-  const historyResults = results.filter((r) => r.source === "history");
   const uniqueInventoryHit =
     tab === "all" &&
     inventoryTotal === 1 &&
-    historyTotal === 0 &&
-    inventoryResults.length === 1 &&
-    historyResults.length === 0;
+    outboundTotal === 0 &&
+    inboundTotal === 0 &&
+    inventoryResults.length === 1;
 
   const loadResults = useCallback(
     async (ignoreResult?: () => boolean) => {
@@ -92,7 +97,8 @@ function SearchContent() {
         setTotal(0);
         setTotalPages(1);
         setInventoryTotal(0);
-        setHistoryTotal(0);
+        setOutboundTotal(0);
+        setInboundTotal(0);
         setError("");
         setLoading(false);
         return;
@@ -115,14 +121,16 @@ function SearchContent() {
         setTotal(payload.total);
         setTotalPages(payload.totalPages);
         setInventoryTotal(payload.inventoryTotal);
-        setHistoryTotal(payload.historyTotal);
+        setOutboundTotal(payload.outboundTotal);
+        setInboundTotal(payload.inboundTotal);
       } catch (requestError) {
         if (ignoreResult?.()) return;
         setResults([]);
         setTotal(0);
         setTotalPages(1);
         setInventoryTotal(0);
-        setHistoryTotal(0);
+        setOutboundTotal(0);
+        setInboundTotal(0);
         setError(
           requestError instanceof Error ? requestError.message : "搜索失败"
         );
@@ -235,12 +243,13 @@ function SearchContent() {
 
       {query && (
         <>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {(
               [
                 ["all", `全部 (${allTotal})`],
                 ["inventory", `库存 (${inventoryTotal})`],
-                ["history", `历史 (${historyTotal})`],
+                ["outbound", `出库 (${outboundTotal})`],
+                ["inbound", `历史 (${inboundTotal})`],
               ] as const
             ).map(([key, label]) => (
               <button
@@ -301,89 +310,88 @@ function SearchContent() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {results.map((r) => (
-                <Card key={r.id}>
-                  <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-medium">
-                          {highlight(r.account.username, query)}
-                        </span>
-                        <Badge
-                          variant={
-                            r.source === "inventory" ? "inventory" : "history"
-                          }
-                        >
-                          {r.source === "inventory" ? "库存" : "历史"}
-                        </Badge>
-                      </div>
-                      <PasswordField value={r.account.password} />
-                      {"outboundAt" in r.account && r.account.outboundAt && (
-                        <p className="text-xs text-muted-foreground">
-                          出库：{formatDateTime(r.account.outboundAt)}
-                        </p>
-                      )}
-                      {r.source === "inventory" && (
-                        <p className="text-xs text-muted-foreground">
-                          入库：{formatDateTime(r.account.inboundAt)}
-                        </p>
-                      )}
-                      {r.account.note?.trim() && (
-                        <p className="break-words whitespace-pre-wrap text-xs text-muted-foreground">
-                          备注：{highlight(r.account.note, query)}
-                        </p>
-                      )}
-                      {r.matchedField &&
-                        r.account.note &&
-                        r.matchedField === r.account.note && (
-                          <p className="text-xs text-primary">
-                            命中字段：备注
+              {results.map((r) => {
+                const badge = searchSourceBadge(r.source);
+                const timestamp = searchResultTimestamp(r);
+                return (
+                  <Card key={r.id}>
+                    <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-medium">
+                            {highlight(r.account.username, query)}
+                          </span>
+                          <Badge variant={badge.variant}>{badge.label}</Badge>
+                        </div>
+                        <div className="grid gap-1 sm:grid-cols-2">
+                          {STANDARD_ACCOUNT_DATA_COLUMNS.map((column) => (
+                            <div
+                              key={column.key}
+                              className="flex flex-wrap items-baseline gap-2 text-sm"
+                            >
+                              <span className="text-xs text-muted-foreground">
+                                {column.label}：
+                              </span>
+                              <AccountFieldCell column={column} record={r.account} />
+                            </div>
+                          ))}
+                        </div>
+                        {timestamp && (
+                          <p className="text-xs text-muted-foreground">
+                            {r.source === "outbound" ? "出库" : "入库"}：
+                            {formatDateTime(timestamp)}
                           </p>
                         )}
-                    </div>
-                    <div className="flex flex-col items-end gap-2">
-                      {r.source === "inventory" && (
-                        <OutboundNoteField
-                          existingNote={r.account.note}
-                          value={outboundNotes[r.account.username]?.note ?? ""}
-                          onChange={(note) =>
-                            updateOutboundNote(r.account.username, { note })
-                          }
-                          overwriteNote={
-                            outboundNotes[r.account.username]?.overwriteNote ?? false
-                          }
-                          onOverwriteNoteChange={(overwriteNote) =>
-                            updateOutboundNote(r.account.username, { overwriteNote })
-                          }
-                          disabled={Boolean(outboundUsername)}
-                        />
-                      )}
-                      <div className="flex gap-2">
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => copyResult(r)}
-                        >
-                          <Copy className="h-4 w-4" />
-                          复制
-                        </Button>
-                        {r.source === "inventory" && (
-                          <Button
-                            size="sm"
-                            onClick={() => void outboundResult(r)}
-                            disabled={Boolean(outboundUsername)}
-                          >
-                            <Upload className="h-4 w-4" />
-                            {outboundUsername === r.account.username
-                              ? "出库中…"
-                              : "出库并复制"}
-                          </Button>
-                        )}
+                        {r.matchedField &&
+                          r.account.note &&
+                          r.matchedField === r.account.note && (
+                            <p className="text-xs text-primary">命中字段：备注</p>
+                          )}
                       </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
+                      <div className="flex flex-col items-end gap-2">
+                        {r.source === "inventory" && (
+                          <OutboundNoteField
+                            existingNote={r.account.note}
+                            value={outboundNotes[r.account.username]?.note ?? ""}
+                            onChange={(note) =>
+                              updateOutboundNote(r.account.username, { note })
+                            }
+                            overwriteNote={
+                              outboundNotes[r.account.username]?.overwriteNote ?? false
+                            }
+                            onOverwriteNoteChange={(overwriteNote) =>
+                              updateOutboundNote(r.account.username, { overwriteNote })
+                            }
+                            disabled={Boolean(outboundUsername)}
+                          />
+                        )}
+                        <div className="flex gap-2">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => copyResult(r)}
+                          >
+                            <Copy className="h-4 w-4" />
+                            复制
+                          </Button>
+                          {r.source === "inventory" && (
+                            <Button
+                              size="sm"
+                              onClick={() => void outboundResult(r)}
+                              disabled={Boolean(outboundUsername)}
+                            >
+                              <Upload className="h-4 w-4" />
+                              {outboundUsername === r.account.username
+                                ? "出库中…"
+                                : "出库并复制"}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
 
               {uniqueInventoryHit && (
                 <Card className="border-primary/30 bg-primary/5">

@@ -5,6 +5,7 @@ import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { DateRangeFilter } from "@/types/account";
+import { ACCOUNT_SEARCH_PLACEHOLDER } from "@/lib/account-columns";
 
 interface HistoryFiltersProps {
   query: string;
@@ -28,7 +29,7 @@ export function HistoryFilters({
   ranges,
   onQueryChange,
   onRangesChange,
-  placeholder = "搜索账号、邮箱、网址或日期…",
+  placeholder = ACCOUNT_SEARCH_PLACEHOLDER,
 }: HistoryFiltersProps) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");

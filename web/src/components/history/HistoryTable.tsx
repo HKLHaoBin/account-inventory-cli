@@ -1,11 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Copy, Download } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { PasswordField } from "@/components/ui/password-field";
+import {
+  AccountColumnHeader,
+  AccountFieldCell,
+  OUTBOUND_RECORD_COLUMNS,
+} from "@/lib/account-columns";
 import { exportHistoryText } from "@/lib/api";
 import {
   type HistoryManualCopyKind,
@@ -379,6 +383,15 @@ export function HistoryTable({
     }
   }
 
+  const tableColumns = useMemo(
+    () =>
+      OUTBOUND_RECORD_COLUMNS.filter(
+        (column) =>
+          column.key !== "outboundAt" || mode === "outbound" || mode === "all"
+      ),
+    [mode]
+  );
+
   const groups =
     mode === "all"
       ? groupByDate(records as HistoryRecord[], "timestamp")
@@ -471,20 +484,14 @@ export function HistoryTable({
                         <th className="px-4 py-3 text-left font-medium">类型</th>
                       )}
                       <th className="px-4 py-3 text-left font-medium">账号</th>
-                      <th className="px-4 py-3 text-left font-medium">密码</th>
-                      <th className="px-4 py-3 text-left font-medium">邮箱</th>
-                      <th className="px-4 py-3 text-left font-medium">邮箱密码</th>
-                      <th className="px-4 py-3 text-left font-medium">入库时间</th>
-                      {(mode === "outbound" || mode === "all") && (
-                        <th className="px-4 py-3 text-left font-medium">出库时间</th>
-                      )}
-                      <th className="px-4 py-3 text-left font-medium">备注</th>
+                      {tableColumns.slice(1).map((column) => (
+                        <AccountColumnHeader key={column.key} column={column} />
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
                     {group.items.map((record) => {
                       const history = isHistoryRecord(record) ? record : null;
-                      const outbound = isOutboundRecord(record) ? record : null;
                       return (
                         <tr
                           key={record.id}
@@ -521,44 +528,11 @@ export function HistoryTable({
                             </td>
                           )}
                           <td className="px-4 py-3 font-mono">{record.username}</td>
-                          <td className="px-4 py-3">
-                            <PasswordField value={record.password} />
-                          </td>
-                          <td className="px-4 py-3">
-                            {record.email ? (
-                              <span className="text-xs">{record.email}</span>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3">
-                            {record.emailPassword ? (
-                              <PasswordField value={record.emailPassword} />
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                            {record.inboundAt ? (
-                              formatDateTime(record.inboundAt)
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </td>
-                          {(mode === "outbound" || mode === "all") && (
-                            <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
-                              {outbound?.outboundAt || history?.outboundAt ? (
-                                formatDateTime(
-                                  outbound?.outboundAt ?? history?.outboundAt ?? ""
-                                )
-                              ) : (
-                                <span className="text-muted-foreground">—</span>
-                              )}
+                          {tableColumns.slice(1).map((column) => (
+                            <td key={column.key} className="px-4 py-3">
+                              <AccountFieldCell column={column} record={record} />
                             </td>
-                          )}
-                          <td className="break-words whitespace-pre-wrap px-4 py-3 text-xs text-muted-foreground">
-                            {record.note?.trim() ? record.note : "—"}
-                          </td>
+                          ))}
                         </tr>
                       );
                     })}
@@ -608,32 +582,39 @@ export function HistoryTable({
                               {record.username}
                             </span>
                           </div>
-                          <PasswordField value={record.password} />
-                          {record.email && (
-                            <span className="text-xs">{record.email}</span>
-                          )}
-                          {record.emailPassword && (
-                            <PasswordField value={record.emailPassword} />
-                          )}
-                          {record.inboundAt && (
-                            <p className="text-xs text-muted-foreground">
-                              入库 {formatDateTime(record.inboundAt)}
-                            </p>
-                          )}
-                          {(mode === "outbound" || mode === "all") &&
-                            (outbound?.outboundAt || history?.outboundAt) && (
-                              <p className="text-xs text-muted-foreground">
-                                出库{" "}
-                                {formatDateTime(
-                                  outbound?.outboundAt ?? history?.outboundAt ?? ""
+                          {tableColumns.slice(1).map((column) => {
+                            if (column.key === "password") {
+                              return (
+                                <div key={column.key}>
+                                  <AccountFieldCell column={column} record={record} />
+                                </div>
+                              );
+                            }
+                            if (column.key === "note") {
+                              return record.note?.trim() ? (
+                                <p
+                                  key={column.key}
+                                  className="break-words whitespace-pre-wrap text-xs text-muted-foreground"
+                                >
+                                  备注：{record.note}
+                                </p>
+                              ) : null;
+                            }
+                            const value = record[column.key as keyof typeof record];
+                            if (!value) return null;
+                            return (
+                              <div key={column.key} className="text-xs text-muted-foreground">
+                                {column.label}{" "}
+                                {column.kind === "password" ? (
+                                  <AccountFieldCell column={column} record={record} />
+                                ) : column.kind === "datetime" ? (
+                                  formatDateTime(String(value))
+                                ) : (
+                                  String(value)
                                 )}
-                              </p>
-                            )}
-                          {record.note?.trim() && (
-                            <p className="break-words whitespace-pre-wrap text-xs text-muted-foreground">
-                              备注：{record.note}
-                            </p>
-                          )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     </div>

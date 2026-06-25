@@ -51,7 +51,23 @@ def _reset_inventory() -> None:
         conn.execute("DELETE FROM account_notes")
 
 
+def _ensure_default_active_database() -> None:
+    records = db.list_databases()
+    default = next((item for item in records if item["id"] == "default"), records[0])
+    db.set_active_database(default["id"])
+
+
+def _cleanup_extra_databases() -> None:
+    _ensure_default_active_database()
+    for item in list(db.list_databases()):
+        if item["id"] != "default":
+            db.delete_database(item["id"])
+    db.save_database_groups([])
+    _reset_inventory()
+
+
 def test_scenario_1_initial_inventory_zero() -> None:
+    _reset_inventory()
     assert db.count_inventory() == 0
 
 
@@ -230,7 +246,7 @@ def test_batch_inbound_duplicate_in_batch() -> None:
         exists_in_outbound=db.exists_in_outbound,
     )
     assert isinstance(second, InboundFailure)
-    assert second.reason == "账号 dup 已在库存中"
+    assert second.reason == "账号 dup 已在组内库存中"
     assert db.count_inventory() == 1
 
 
@@ -631,7 +647,9 @@ def test_read_line_or_exit_unix_esc() -> None:
     fake_tty = mock.MagicMock()
     with mock.patch.object(console_input, "_IS_WINDOWS", False), mock.patch.dict(
         "sys.modules", {"termios": fake_termios, "tty": fake_tty}
-    ), mock.patch("sys.stdin.read", return_value="\x1b"):
+    ), mock.patch("sys.stdin.read", return_value="\x1b"), mock.patch(
+        "sys.stdin.fileno", return_value=0
+    ):
         fake_termios.tcgetattr.return_value = []
         assert console_input.read_line_or_exit("") is None
         fake_termios.tcsetattr.assert_called()
@@ -820,17 +838,22 @@ def test_insert_outbound_record() -> None:
 
 
 def test_database_registry_registers_existing_db() -> None:
-    _reset_inventory()
-    db.insert_account("legacy", "pw")
-    db._registry_path().unlink(missing_ok=True)  # type: ignore[attr-defined]
+    tmp = _use_temp_db()
+    try:
+        _reset_inventory()
+        db.insert_account("legacy", "pw")
+        db._registry_path().unlink(missing_ok=True)  # type: ignore[attr-defined]
 
-    db.init_db()
-    databases = db.list_database_info()
-    assert len(databases) == 1
-    assert databases[0]["name"] == "默认数据库"
-    assert databases[0]["file_name"] == "accounts.db"
-    assert databases[0]["active"]
-    assert db.exists_in_inventory("legacy")
+        db.init_db()
+        databases = db.list_database_info()
+        assert len(databases) == 1
+        assert databases[0]["name"] == "默认数据库"
+        assert databases[0]["file_name"] == "accounts.db"
+        assert databases[0]["active"]
+        assert db.exists_in_inventory("legacy")
+    finally:
+        tmp.cleanup()
+        db._DATA_DIR = ROOT / "data"  # type: ignore[attr-defined]
 
 
 def test_database_create_switch_rename_and_delete() -> None:
@@ -895,6 +918,193 @@ def test_database_clone_copies_data_and_stays_independent() -> None:
     assert db.exists_in_inventory("source_user")
     assert not db.exists_in_inventory("clone_only")
     db.delete_database(cloned["id"])
+
+
+def test_database_groups_cross_group_validation() -> None:
+    _reset_inventory()
+    db_a1 = db.create_database("库 A1")
+    db_b1 = db.create_database("库 B1")
+    db_a2 = db.create_database("库 A2")
+    db_b2 = db.create_database("库 B2")
+    db.save_database_groups(
+        [
+            {
+                "id": "group-a",
+                "name": "组 A",
+                "databaseIds": [db_a1["id"], db_a2["id"]],
+            },
+            {
+                "id": "group-b",
+                "name": "组 B",
+                "databaseIds": [db_b1["id"], db_b2["id"]],
+            },
+        ]
+    )
+
+    db.set_active_database(db_a1["id"])
+    db.insert_account("shared_user", "pw")
+
+    db.set_active_database(db_a2["id"])
+    assert "shared_user" in db.exists_in_inventory_many_for_group(["shared_user"])
+
+    db.set_active_database(db_b1["id"])
+    assert "shared_user" not in db.exists_in_inventory_many_for_group(["shared_user"])
+
+    client = _api_client()
+    db.set_active_database(db_a2["id"])
+    preview = client.post(
+        "/api/inbound/preview",
+        json={"text": "shared_user----pw2"},
+    ).json()["rows"][0]
+    assert preview["category"] == "duplicate"
+    assert preview["reason"] == "账号 shared_user 已在组内库存中"
+
+    db.set_active_database(db_b1["id"])
+    preview_other = client.post(
+        "/api/inbound/preview",
+        json={"text": "shared_user----pw2"},
+    ).json()["rows"][0]
+    assert preview_other["category"] == "ready"
+    _cleanup_extra_databases()
+
+
+def test_database_groups_unassigned_singleton() -> None:
+    _reset_inventory()
+    default = db.get_active_database_info()
+    solo = db.create_database("独立库")
+
+    db.set_active_database(default["id"])
+    db.insert_account("only_default", "pw")
+
+    db.set_active_database(solo["id"])
+    assert "only_default" not in db.exists_in_inventory_many_for_group(
+        ["only_default"]
+    )
+    db.insert_account("solo_user", "pw")
+
+    db.set_active_database(default["id"])
+    assert "solo_user" not in db.exists_in_inventory_many_for_group(["solo_user"])
+    _cleanup_extra_databases()
+
+
+def test_database_groups_delete_cleanup() -> None:
+    _reset_inventory()
+    default = db.get_active_database_info()
+    extra = db.create_database("待删库")
+    db.save_database_groups(
+        [
+            {
+                "id": "group-1",
+                "name": "测试组",
+                "databaseIds": [default["id"], extra["id"]],
+            }
+        ]
+    )
+
+    db.delete_database(extra["id"])
+    groups = db.list_database_groups()
+    assert len(groups) == 1
+    assert groups[0]["databaseIds"] == [default["id"]]
+    _cleanup_extra_databases()
+
+
+def test_api_database_groups_get_and_put() -> None:
+    _reset_inventory()
+    created = db.create_database("组测试库")
+    client = _api_client()
+
+    get_response = client.get("/api/database-groups")
+    assert get_response.status_code == 200
+    payload = get_response.json()
+    assert "groups" in payload
+    assert "databases" in payload
+    assert len(payload["databases"]) >= 2
+
+    put_response = client.put(
+        "/api/database-groups",
+        json={
+            "groups": [
+                {
+                    "id": "grp-1",
+                    "name": "新组",
+                    "databaseIds": [created["id"]],
+                }
+            ]
+        },
+    )
+    assert put_response.status_code == 200
+    saved = put_response.json()
+    assert saved["groups"][0]["name"] == "新组"
+    assert saved["groups"][0]["databaseIds"] == [created["id"]]
+    _cleanup_extra_databases()
+
+
+def test_search_inventory_expanded_fields() -> None:
+    _reset_inventory()
+    db.insert_account("field_user", "secret_pw", url="https://field.example")
+    rows = db.list_inventory(query="secret_pw")
+    assert len(rows) == 1
+    assert rows[0]["username"] == "field_user"
+
+
+def test_search_inbound_history_zone() -> None:
+    _reset_inventory()
+    db.insert_account("inbound_only", "pw", email="inbound.zone@test")
+    db.outbound_by_username("inbound_only")
+    rows = db.search_inbound_history("inbound.zone")
+    assert len(rows) == 1
+    assert rows[0]["username"] == "inbound_only"
+
+    client = _api_client()
+    response = client.get("/api/search", params={"q": "inbound.zone", "source": "inbound"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["inboundTotal"] == 1
+    assert payload["results"][0]["source"] == "inbound"
+    assert payload["results"][0]["account"]["username"] == "inbound_only"
+
+
+def test_api_search_three_zone_pagination() -> None:
+    _reset_inventory()
+    for index in range(2):
+        db.insert_account(f"zone_inv_{index}", "pw", email=f"zone{index}@mail.test")
+    for index in range(2):
+        username = f"zone_out_{index}"
+        db.insert_account(username, "pw", email=f"zone_out{index}@mail.test")
+        db.outbound_by_username(username)
+    db.insert_account("zone_in_only", "pw", email="zone_inbound_only@test")
+
+    client = _api_client()
+    query = "zone"
+    expected_inventory = db.count_search_inventory(query)
+    expected_outbound = db.count_search_outbound_history(query)
+    expected_inbound = db.count_search_inbound_history(query)
+    expected_total = expected_inventory + expected_outbound + expected_inbound
+    page1 = client.get(
+        "/api/search",
+        params={"q": query, "source": "all", "page": 1, "pageSize": 2},
+    ).json()
+    page2 = client.get(
+        "/api/search",
+        params={"q": query, "source": "all", "page": 2, "pageSize": 2},
+    ).json()
+    page3 = client.get(
+        "/api/search",
+        params={"q": query, "source": "all", "page": 3, "pageSize": 2},
+    ).json()
+
+    assert page1["inventoryTotal"] == expected_inventory
+    assert page1["outboundTotal"] == expected_outbound
+    assert page1["inboundTotal"] == expected_inbound
+    assert page1["total"] == expected_total
+    assert page1["inventoryTotal"] + page1["outboundTotal"] + page1["inboundTotal"] == page1["total"]
+    assert all(item["source"] == "inventory" for item in page1["results"])
+
+    assert page2["results"][0]["source"] == "inventory"
+    assert page2["results"][1]["source"] == "outbound"
+
+    assert page3["results"][0]["source"] == "outbound"
+    assert page3["results"][1]["source"] == "inbound"
 
 
 def test_separator_rules_default() -> None:
@@ -1352,8 +1562,9 @@ def test_api_inbound_commit_with_note() -> None:
     assert history[0]["note"] == "客户A"
 
     search = client.get("/api/search", params={"q": "客户A"}).json()["results"]
-    assert len(search) == 1
-    assert search[0]["account"]["note"] == "客户A"
+    assert len(search) == 2
+    assert {item["source"] for item in search} == {"inventory", "inbound"}
+    assert all(item["account"]["note"] == "客户A" for item in search)
 
 
 def test_api_fifo_commit_with_note() -> None:
@@ -1385,8 +1596,11 @@ def test_api_fifo_commit_with_note() -> None:
     assert history[0]["note"] == "出库后备注"
 
     search = client.get("/api/search", params={"q": "出库后备注"}).json()["results"]
-    assert len(search) == 1
-    assert search[0]["source"] == "history"
+    assert len(search) == 2
+    assert {item["source"] for item in search} == {"outbound", "inbound"}
+    outbound_hits = [item for item in search if item["source"] == "outbound"]
+    assert len(outbound_hits) == 1
+    assert outbound_hits[0]["account"]["note"] == "出库后备注"
 
 
 def test_api_outbound_paste_with_note() -> None:
@@ -1572,9 +1786,11 @@ def test_api_outbound_by_username_with_note_searchable() -> None:
     assert history[0]["username"] == "search_out"
     assert history[0]["note"] == "搜索出库备注"
 
-    search = client.get("/api/search", params={"q": "搜索出库备注"}).json()["results"]
+    search = client.get(
+        "/api/search", params={"q": "搜索出库备注", "source": "outbound"}
+    ).json()["results"]
     assert len(search) == 1
-    assert search[0]["source"] == "history"
+    assert search[0]["source"] == "outbound"
     assert search[0]["account"]["note"] == "搜索出库备注"
 
 
@@ -1682,7 +1898,9 @@ def test_api_search_inventory_and_history() -> None:
     db.outbound_by_username("history_search")
     client = _api_client()
 
-    stock_response = client.get("/api/search", params={"q": "stock@mail"})
+    stock_response = client.get(
+        "/api/search", params={"q": "stock@mail", "source": "inventory"}
+    )
     assert stock_response.status_code == 200
     stock_results = stock_response.json()["results"]
     assert len(stock_results) == 1
@@ -1690,11 +1908,13 @@ def test_api_search_inventory_and_history() -> None:
     assert stock_results[0]["account"]["username"] == "stock_search"
     assert stock_results[0]["account"]["inboundAt"]
 
-    history_response = client.get("/api/search", params={"q": "history.example"})
+    history_response = client.get(
+        "/api/search", params={"q": "history.example", "source": "outbound"}
+    )
     assert history_response.status_code == 200
     history_results = history_response.json()["results"]
     assert len(history_results) == 1
-    assert history_results[0]["source"] == "history"
+    assert history_results[0]["source"] == "outbound"
     assert history_results[0]["account"]["username"] == "history_search"
     assert history_results[0]["account"]["inboundAt"]
     assert history_results[0]["account"]["outboundAt"]
@@ -1704,7 +1924,9 @@ def test_api_search_inventory_and_history() -> None:
     assert empty_response.json()["results"] == []
 
     db.insert_account("100%api", "p3")
-    like_response = client.get("/api/search", params={"q": "%api"})
+    like_response = client.get(
+        "/api/search", params={"q": "%api", "source": "inventory"}
+    )
     assert like_response.status_code == 200
     like_results = like_response.json()["results"]
     assert len(like_results) == 1
@@ -2512,33 +2734,38 @@ def test_api_search_pagination_source_all() -> None:
 
     client = _api_client()
     query = "shared"
+    expected_inventory = db.count_search_inventory(query)
+    expected_outbound = db.count_search_outbound_history(query)
+    expected_inbound = db.count_search_inbound_history(query)
+    expected_total = expected_inventory + expected_outbound + expected_inbound
     inv_payload = client.get(
         "/api/search",
         params={"q": query, "source": "inventory", "pageSize": 2, "page": 1},
     ).json()
-    hist_payload = client.get(
+    outbound_payload = client.get(
         "/api/search",
-        params={"q": query, "source": "history", "pageSize": 2, "page": 1},
+        params={"q": query, "source": "outbound", "pageSize": 2, "page": 1},
     ).json()
-    assert inv_payload["total"] == 3
-    assert hist_payload["total"] == 2
-    assert inv_payload["inventoryTotal"] == 3
-    assert inv_payload["historyTotal"] == 2
-    assert hist_payload["inventoryTotal"] == 3
-    assert hist_payload["historyTotal"] == 2
+    assert inv_payload["total"] == expected_inventory
+    assert outbound_payload["total"] == expected_outbound
+    assert inv_payload["inventoryTotal"] == expected_inventory
+    assert inv_payload["outboundTotal"] == expected_outbound
+    assert outbound_payload["inventoryTotal"] == expected_inventory
+    assert outbound_payload["outboundTotal"] == expected_outbound
     assert len(inv_payload["results"]) == 2
-    assert len(hist_payload["results"]) == 2
-    assert inv_payload["inventoryTotal"] + inv_payload["historyTotal"] == 5
-    assert hist_payload["inventoryTotal"] + hist_payload["historyTotal"] == 5
+    assert len(outbound_payload["results"]) == 2
+    assert inv_payload["inventoryTotal"] + inv_payload["outboundTotal"] + inv_payload["inboundTotal"] == expected_total
+    assert outbound_payload["inventoryTotal"] + outbound_payload["outboundTotal"] + outbound_payload["inboundTotal"] == expected_total
 
     page1 = client.get(
         "/api/search",
         params={"q": query, "source": "all", "page": 1, "pageSize": 2},
     ).json()
-    assert page1["inventoryTotal"] == 3
-    assert page1["historyTotal"] == 2
-    assert page1["total"] == 5
-    assert page1["inventoryTotal"] + page1["historyTotal"] == page1["total"]
+    assert page1["inventoryTotal"] == expected_inventory
+    assert page1["outboundTotal"] == expected_outbound
+    assert page1["inboundTotal"] == expected_inbound
+    assert page1["total"] == expected_total
+    assert page1["inventoryTotal"] + page1["outboundTotal"] + page1["inboundTotal"] == page1["total"]
     assert len(page1["results"]) == 2
     assert all(item["source"] == "inventory" for item in page1["results"])
 
@@ -2548,14 +2775,50 @@ def test_api_search_pagination_source_all() -> None:
     ).json()
     assert len(page2["results"]) == 2
     assert page2["results"][0]["source"] == "inventory"
-    assert page2["results"][1]["source"] == "history"
+    assert page2["results"][1]["source"] == "outbound"
 
     page3 = client.get(
         "/api/search",
         params={"q": query, "source": "all", "page": 3, "pageSize": 2},
     ).json()
-    assert len(page3["results"]) == 1
-    assert page3["results"][0]["source"] == "history"
+    assert len(page3["results"]) == 2
+    assert page3["results"][0]["source"] == "outbound"
+    assert page3["results"][1]["source"] == "inbound"
+
+
+def test_api_search_source_history() -> None:
+    _reset_inventory()
+    for index in range(2):
+        db.insert_account(f"hist_inv_{index}", "pw", email=f"hist{index}@mail.test")
+    username = "hist_out_0"
+    db.insert_account(username, "pw", email="hist_out@mail.test")
+    db.outbound_by_username(username)
+
+    client = _api_client()
+    query = "hist"
+    expected_inventory = db.count_search_inventory(query)
+    expected_outbound = db.count_search_outbound_history(query)
+    expected_inbound = db.count_search_inbound_history(query)
+    expected_total = expected_inventory + expected_outbound + expected_inbound
+
+    all_response = client.get("/api/search", params={"q": query, "source": "all"})
+    history_response = client.get("/api/search", params={"q": query, "source": "history"})
+    assert history_response.status_code == 200
+
+    all_payload = all_response.json()
+    history_payload = history_response.json()
+    assert history_payload["inventoryTotal"] == expected_inventory
+    assert history_payload["outboundTotal"] == expected_outbound
+    assert history_payload["inboundTotal"] == expected_inbound
+    assert history_payload["total"] == expected_total
+    assert (
+        history_payload["inventoryTotal"]
+        + history_payload["outboundTotal"]
+        + history_payload["inboundTotal"]
+        == history_payload["total"]
+    )
+    assert history_payload["results"] == all_payload["results"]
+    assert history_payload["total"] == all_payload["total"]
 
 
 def test_api_history_export_matches_total() -> None:

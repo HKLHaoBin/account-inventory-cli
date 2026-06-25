@@ -420,6 +420,7 @@ export default function InboundPage() {
                   <th className="px-3 py-2.5 text-left font-medium">账号</th>
                   <th className="px-3 py-2.5 text-left font-medium">密码</th>
                   <th className="px-3 py-2.5 text-left font-medium">邮箱</th>
+                  <th className="px-3 py-2.5 text-left font-medium">邮箱密码</th>
                   <th className="px-3 py-2.5 text-left font-medium">网址</th>
                   <th className="px-3 py-2.5 text-left font-medium">备注</th>
                   <th className="px-3 py-2.5 text-left font-medium">信息</th>
@@ -429,7 +430,7 @@ export default function InboundPage() {
               <tbody>
                 {filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={10} className="px-3 py-8 text-center text-muted-foreground">
                       输入账号文本后会转换为表格
                     </td>
                   </tr>
@@ -473,6 +474,9 @@ export default function InboundPage() {
                         </td>
                         <td className="px-3 py-2.5 font-mono text-xs">
                           {row.email ?? "-"}
+                        </td>
+                        <td className="px-3 py-2.5 font-mono text-xs">
+                          {row.emailPassword ? maskValue(row.emailPassword) : "-"}
                         </td>
                         <td className="max-w-[220px] truncate px-3 py-2.5 font-mono text-xs">
                           {row.url ?? "-"}
@@ -574,6 +578,11 @@ export default function InboundPage() {
                           )}
                           {row.email && (
                             <p className="truncate font-mono">{row.email}</p>
+                          )}
+                          {row.emailPassword && (
+                            <p className="truncate font-mono">
+                              邮箱密码 {maskValue(row.emailPassword)}
+                            </p>
                           )}
                           {row.url && (
                             <p className="break-all font-mono">{row.url}</p>

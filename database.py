@@ -84,16 +84,67 @@ def _read_registry_payload() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _write_registry(records: list[dict[str, Any]], active_id: str) -> None:
+def _normalize_database_groups(
+    raw_groups: object,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_groups, list):
+        return []
+
+    groups: list[dict[str, Any]] = []
+    seen_group_ids: set[str] = set()
+    for raw in raw_groups:
+        if not isinstance(raw, dict):
+            continue
+        group_id = str(raw.get("id") or "").strip()
+        name = str(raw.get("name") or "").strip()
+        raw_ids = raw.get("databaseIds")
+        if raw_ids is None:
+            raw_ids = raw.get("database_ids")
+        if not group_id or not name or not isinstance(raw_ids, list):
+            continue
+        if group_id in seen_group_ids:
+            continue
+        database_ids: list[str] = []
+        seen_db_ids: set[str] = set()
+        for raw_id in raw_ids:
+            database_id = str(raw_id or "").strip()
+            if not database_id or database_id in seen_db_ids:
+                continue
+            seen_db_ids.add(database_id)
+            database_ids.append(database_id)
+        groups.append(
+            {
+                "id": group_id,
+                "name": name,
+                "databaseIds": database_ids,
+            }
+        )
+        seen_group_ids.add(group_id)
+    return groups
+
+
+def _write_registry(
+    records: list[dict[str, Any]],
+    active_id: str,
+    *,
+    database_groups: list[dict[str, Any]] | None = None,
+) -> None:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     normalized: list[dict[str, Any]] = []
     for record in records:
         item = dict(record)
         item["active"] = item["id"] == active_id
         normalized.append(item)
+    existing = _read_registry_payload()
+    groups = (
+        database_groups
+        if database_groups is not None
+        else _normalize_database_groups(existing.get("database_groups"))
+    )
     payload = {
         "active_database_id": active_id,
         "databases": normalized,
+        "database_groups": groups,
     }
     _registry_path().write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -439,6 +490,174 @@ def _public_database_record(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def list_database_groups() -> list[dict[str, Any]]:
+    payload = _read_registry_payload()
+    return _normalize_database_groups(payload.get("database_groups"))
+
+
+def _validate_database_group_name(name: str) -> str:
+    value = name.strip()
+    if not value:
+        raise ValueError("组名称不能为空")
+    if len(value) > 60:
+        raise ValueError("组名称不能超过 60 个字符")
+    return value
+
+
+def save_database_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records, active_id = _ensure_registry()
+    valid_ids = {record["id"] for record in records}
+    normalized: list[dict[str, Any]] = []
+    seen_db_ids: set[str] = set()
+
+    for raw in groups:
+        if not isinstance(raw, dict):
+            raise ValueError("组配置格式无效")
+        group_id = str(raw.get("id") or "").strip() or uuid.uuid4().hex
+        name = _validate_database_group_name(str(raw.get("name") or ""))
+        raw_ids = raw.get("databaseIds")
+        if raw_ids is None:
+            raw_ids = raw.get("database_ids")
+        if not isinstance(raw_ids, list):
+            raise ValueError("databaseIds 必须是数组")
+
+        database_ids: list[str] = []
+        for raw_id in raw_ids:
+            database_id = str(raw_id or "").strip()
+            if not database_id:
+                continue
+            if database_id not in valid_ids:
+                raise ValueError(f"数据库不存在：{database_id}")
+            if database_id in seen_db_ids:
+                raise ValueError(f"数据库不能属于多个组：{database_id}")
+            seen_db_ids.add(database_id)
+            database_ids.append(database_id)
+
+        normalized.append(
+            {
+                "id": group_id,
+                "name": name,
+                "databaseIds": database_ids,
+            }
+        )
+
+    _write_registry(records, active_id, database_groups=normalized)
+    return normalized
+
+
+def get_group_database_ids(database_id: str | None = None) -> list[str]:
+    if database_id is None:
+        database_id = _active_database_record()["id"]
+    else:
+        database_id = database_id.strip()
+
+    for group in list_database_groups():
+        if database_id in group["databaseIds"]:
+            return list(group["databaseIds"])
+    return [database_id]
+
+
+def _database_record_by_id(
+    database_id: str,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    items = records if records is not None else _ensure_registry()[0]
+    return next((item for item in items if item["id"] == database_id), None)
+
+
+def exists_in_inventory_many_for_group(
+    usernames: list[str],
+    database_id: str | None = None,
+) -> set[str]:
+    if not usernames:
+        return set()
+
+    unique = list(dict.fromkeys(usernames))
+    placeholders = ",".join("?" * len(unique))
+    found: set[str] = set()
+    records, _ = _ensure_registry()
+    for db_id in get_group_database_ids(database_id):
+        record = _database_record_by_id(db_id, records)
+        if record is None:
+            continue
+        _init_database_file(record)
+        with _connect_to(_database_path(record)) as conn:
+            rows = conn.execute(
+                f"SELECT username FROM accounts WHERE username IN ({placeholders})",
+                unique,
+            ).fetchall()
+        found.update(row["username"] for row in rows)
+        if len(found) == len(unique):
+            break
+    return found
+
+
+def exists_in_outbound_many_for_group(
+    usernames: list[str],
+    database_id: str | None = None,
+) -> set[str]:
+    if not usernames:
+        return set()
+
+    unique = list(dict.fromkeys(usernames))
+    placeholders = ",".join("?" * len(unique))
+    found: set[str] = set()
+    records, _ = _ensure_registry()
+    for db_id in get_group_database_ids(database_id):
+        record = _database_record_by_id(db_id, records)
+        if record is None:
+            continue
+        _init_database_file(record)
+        with _connect_to(_database_path(record)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT username
+                FROM outbound_records
+                WHERE username IN ({placeholders})
+                """,
+                unique,
+            ).fetchall()
+        found.update(row["username"] for row in rows)
+        if len(found) == len(unique):
+            break
+    return found
+
+
+def get_latest_outbound_times_for_group(
+    usernames: list[str],
+    database_id: str | None = None,
+) -> dict[str, str]:
+    if not usernames:
+        return {}
+
+    unique = list(dict.fromkeys(usernames))
+    placeholders = ",".join("?" * len(unique))
+    latest: dict[str, str] = {}
+    records, _ = _ensure_registry()
+    for db_id in get_group_database_ids(database_id):
+        record = _database_record_by_id(db_id, records)
+        if record is None:
+            continue
+        _init_database_file(record)
+        with _connect_to(_database_path(record)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT username, MAX(outbound_at) AS outbound_at
+                FROM outbound_records
+                WHERE username IN ({placeholders})
+                GROUP BY username
+                """,
+                unique,
+            ).fetchall()
+        for row in rows:
+            username = row["username"]
+            outbound_at = row["outbound_at"]
+            current = latest.get(username)
+            if current is None or outbound_at > current:
+                latest[username] = outbound_at
+    return latest
+
+
 def list_databases() -> list[dict[str, Any]]:
     records, active_id = _ensure_registry()
     return [
@@ -600,30 +819,64 @@ def delete_database(database_id: str) -> dict[str, Any]:
         replacement = _default_database_record()
         remaining = [replacement]
         active_id = replacement["id"]
-        _write_registry(remaining, active_id)
+        cleaned_groups: list[dict[str, Any]] = []
+        for group in list_database_groups():
+            cleaned_groups.append({**group, "databaseIds": []})
+        _write_registry(remaining, active_id, database_groups=cleaned_groups)
         _init_database_file(replacement)
         return database_info(replacement)
 
     next_active_id = active_id if active_id != database_id else str(remaining[0]["id"])
-    _write_registry(remaining, next_active_id)
+    remaining_ids = {item["id"] for item in remaining}
+    cleaned_groups: list[dict[str, Any]] = []
+    for group in list_database_groups():
+        cleaned_groups.append(
+            {
+                **group,
+                "databaseIds": [
+                    item_id
+                    for item_id in group["databaseIds"]
+                    if item_id != database_id and item_id in remaining_ids
+                ],
+            }
+        )
+    _write_registry(remaining, next_active_id, database_groups=cleaned_groups)
     active = next(item for item in remaining if item["id"] == next_active_id)
     _init_database_file(active)
     return database_info({**active, "active": True})
 
 
-def _build_inventory_where(query: str) -> tuple[str, list[Any]]:
+def _account_text_search_clause(
+    query: str,
+    *,
+    table_alias: str = "",
+) -> tuple[str, list[str]]:
     text = query.strip()
     if not text:
         return "", []
+
+    prefix = f"{table_alias}." if table_alias else ""
     pattern = f"%{_escape_like(text)}%"
     return (
-        """
-        WHERE a.username LIKE ? ESCAPE '\\'
-           OR a.email LIKE ? ESCAPE '\\'
-           OR an.note LIKE ? ESCAPE '\\'
+        f"""
+        (
+            {prefix}username LIKE ? ESCAPE '\\'
+            OR {prefix}password LIKE ? ESCAPE '\\'
+            OR {prefix}email LIKE ? ESCAPE '\\'
+            OR {prefix}email_password LIKE ? ESCAPE '\\'
+            OR {prefix}url LIKE ? ESCAPE '\\'
+            OR an.note LIKE ? ESCAPE '\\'
+        )
         """,
-        [pattern, pattern, pattern],
+        [pattern, pattern, pattern, pattern, pattern, pattern],
     )
+
+
+def _build_inventory_where(query: str) -> tuple[str, list[Any]]:
+    clause, params = _account_text_search_clause(query, table_alias="a")
+    if not clause:
+        return "", []
+    return f"WHERE {clause}", params
 
 
 def _inventory_order_clause(sort_by: str, sort_dir: str) -> str:
@@ -798,22 +1051,6 @@ def _row_to_account_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _search_where_clause() -> str:
-    return """
-        WHERE t.username LIKE ? ESCAPE '\\'
-           OR t.password LIKE ? ESCAPE '\\'
-           OR t.email LIKE ? ESCAPE '\\'
-           OR t.email_password LIKE ? ESCAPE '\\'
-           OR t.url LIKE ? ESCAPE '\\'
-           OR an.note LIKE ? ESCAPE '\\'
-    """
-
-
-def _search_pattern_params(substring: str) -> list[str]:
-    pattern = f"%{_escape_like(substring)}%"
-    return [pattern, pattern, pattern, pattern, pattern, pattern]
-
-
 def _search_table(
     table: str,
     substring: str,
@@ -826,12 +1063,12 @@ def _search_table(
     if not substring:
         return []
 
-    params = _search_pattern_params(substring)
+    clause, params = _account_text_search_clause(substring, table_alias="t")
     sql = f"""
         SELECT {columns}
         FROM {table} AS t
         LEFT JOIN account_notes AS an ON an.username = t.username
-        {_search_where_clause()}
+        WHERE {clause}
         ORDER BY {order_by}
     """
     if limit is not None:
@@ -847,14 +1084,14 @@ def _count_search_table(table: str, substring: str) -> int:
     if not substring:
         return 0
 
-    params = _search_pattern_params(substring)
+    clause, params = _account_text_search_clause(substring, table_alias="t")
     with _connect() as conn:
         row = conn.execute(
             f"""
             SELECT COUNT(*) AS n
             FROM {table} AS t
             LEFT JOIN account_notes AS an ON an.username = t.username
-            {_search_where_clause()}
+            WHERE {clause}
             """,
             params,
         ).fetchone()
@@ -946,37 +1183,8 @@ def _history_text_clause(
     include_url: bool = True,
     table_alias: str = "",
 ) -> tuple[str, list[str]]:
-    if not query:
-        return "", []
-
-    prefix = f"{table_alias}." if table_alias else ""
-    pattern = f"%{_escape_like(query)}%"
-    if include_url:
-        return (
-            f"""
-            (
-                {prefix}username LIKE ? ESCAPE '\\'
-                OR {prefix}password LIKE ? ESCAPE '\\'
-                OR {prefix}email LIKE ? ESCAPE '\\'
-                OR {prefix}email_password LIKE ? ESCAPE '\\'
-                OR {prefix}url LIKE ? ESCAPE '\\'
-                OR an.note LIKE ? ESCAPE '\\'
-            )
-            """,
-            [pattern, pattern, pattern, pattern, pattern, pattern],
-        )
-    return (
-        f"""
-        (
-            {prefix}username LIKE ? ESCAPE '\\'
-            OR {prefix}password LIKE ? ESCAPE '\\'
-            OR {prefix}email LIKE ? ESCAPE '\\'
-            OR {prefix}email_password LIKE ? ESCAPE '\\'
-            OR an.note LIKE ? ESCAPE '\\'
-        )
-        """,
-        [pattern, pattern, pattern, pattern, pattern],
-    )
+    del include_url
+    return _account_text_search_clause(query, table_alias=table_alias)
 
 
 def _collect_history_ranges(
@@ -1866,6 +2074,30 @@ def search_outbound_history(
         }
         for row in rows
     ]
+
+
+def count_search_inbound_history(substring: str) -> int:
+    return _count_search_table("inbound_records", substring)
+
+
+def search_inbound_history(
+    substring: str,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    rows = _search_table(
+        "inbound_records",
+        substring,
+        columns=(
+            "t.id, t.username, t.password, t.email, t.email_password, t.url, "
+            "t.inbound_at, COALESCE(an.note, '') AS note"
+        ),
+        order_by="t.inbound_at DESC, t.id DESC",
+        offset=offset,
+        limit=limit,
+    )
+    return [_row_to_inbound_dict(row) for row in rows]
 
 
 def outbound_oldest_many(count: int) -> list[dict[str, Any]]:

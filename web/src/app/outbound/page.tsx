@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
-import { PasswordField } from "@/components/ui/password-field";
 import { BatchNoteControls } from "@/components/notes/batch-note-controls";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
@@ -16,7 +15,11 @@ import { useLastOutboundClipboard } from "@/hooks/use-last-outbound-clipboard";
 import { commitFifo, previewFifo } from "@/lib/api";
 import { subscribeDatabaseChanged } from "@/lib/database-events";
 import { downloadTextFile } from "@/lib/download";
-import { formatDateTime } from "@/lib/utils";
+import {
+  AccountColumnHeader,
+  AccountFieldCell,
+  FIFO_PREVIEW_COLUMNS,
+} from "@/lib/account-columns";
 import type { FifoNoteEntry } from "@/types/account";
 
 export default function OutboundPage() {
@@ -328,10 +331,13 @@ export default function OutboundPage() {
               <thead>
                 <tr className="border-b border-border bg-muted/40">
                   <th className="px-4 py-2.5 text-left font-medium">#</th>
-                  <th className="px-4 py-2.5 text-left font-medium">账号</th>
-                  <th className="px-4 py-2.5 text-left font-medium">密码</th>
-                  <th className="px-4 py-2.5 text-left font-medium">入库时间</th>
-                  <th className="px-4 py-2.5 text-left font-medium">备注</th>
+                  {FIFO_PREVIEW_COLUMNS.map((column) => (
+                    <AccountColumnHeader
+                      key={column.key}
+                      column={column}
+                      className="px-4 py-2.5 text-left font-medium"
+                    />
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -346,36 +352,41 @@ export default function OutboundPage() {
                       )}
                     </td>
                     <td className="px-4 py-2.5 font-mono">{account.username}</td>
-                    <td className="px-4 py-2.5">
-                      <PasswordField value={account.password} />
-                    </td>
-                    <td className="px-4 py-2.5 text-xs text-muted-foreground">
-                      {formatDateTime(account.inboundAt)}
-                    </td>
-                    <td className="min-w-[140px] px-4 py-2.5">
-                      <OutboundNoteField
-                        existingNote={account.note}
-                        value={
-                          fifoNotesByUsername[account.username]?.note ??
-                          account.note ??
-                          ""
-                        }
-                        onChange={(note) =>
-                          updateFifoNote(account.username, {
-                            note,
-                            overwriteNote: false,
-                          })
-                        }
-                        overwriteNote={
-                          fifoNotesByUsername[account.username]?.overwriteNote ??
-                          false
-                        }
-                        onOverwriteNoteChange={(overwriteNote) =>
-                          updateFifoNote(account.username, { overwriteNote })
-                        }
-                        inputClassName="h-8 text-xs"
-                      />
-                    </td>
+                    {FIFO_PREVIEW_COLUMNS.slice(1).map((column) => {
+                      if (column.key === "note") {
+                        return (
+                          <td key={column.key} className="min-w-[140px] px-4 py-2.5">
+                            <OutboundNoteField
+                              existingNote={account.note}
+                              value={
+                                fifoNotesByUsername[account.username]?.note ??
+                                account.note ??
+                                ""
+                              }
+                              onChange={(note) =>
+                                updateFifoNote(account.username, {
+                                  note,
+                                  overwriteNote: false,
+                                })
+                              }
+                              overwriteNote={
+                                fifoNotesByUsername[account.username]?.overwriteNote ??
+                                false
+                              }
+                              onOverwriteNoteChange={(overwriteNote) =>
+                                updateFifoNote(account.username, { overwriteNote })
+                              }
+                              inputClassName="h-8 text-xs"
+                            />
+                          </td>
+                        );
+                      }
+                      return (
+                        <td key={column.key} className="px-4 py-2.5">
+                          <AccountFieldCell column={column} record={account} />
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -404,34 +415,43 @@ export default function OutboundPage() {
                   )}
                 </div>
                 <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                  <PasswordField value={account.password} />
-                  <p className="whitespace-nowrap">
-                    入库 {formatDateTime(account.inboundAt)}
-                  </p>
+                  {FIFO_PREVIEW_COLUMNS.slice(1).map((column) => {
+                    if (column.key === "note") {
+                      return (
+                        <OutboundNoteField
+                          key={column.key}
+                          existingNote={account.note}
+                          value={
+                            fifoNotesByUsername[account.username]?.note ??
+                            account.note ??
+                            ""
+                          }
+                          onChange={(note) =>
+                            updateFifoNote(account.username, {
+                              note,
+                              overwriteNote: false,
+                            })
+                          }
+                          overwriteNote={
+                            fifoNotesByUsername[account.username]?.overwriteNote ??
+                            false
+                          }
+                          onOverwriteNoteChange={(overwriteNote) =>
+                            updateFifoNote(account.username, { overwriteNote })
+                          }
+                          className="mt-2 w-full"
+                          inputClassName="h-8 w-full text-xs"
+                        />
+                      );
+                    }
+                    return (
+                      <div key={column.key}>
+                        <span className="text-muted-foreground">{column.label} </span>
+                        <AccountFieldCell column={column} record={account} />
+                      </div>
+                    );
+                  })}
                 </div>
-                <OutboundNoteField
-                  existingNote={account.note}
-                  value={
-                    fifoNotesByUsername[account.username]?.note ??
-                    account.note ??
-                    ""
-                  }
-                  onChange={(note) =>
-                    updateFifoNote(account.username, {
-                      note,
-                      overwriteNote: false,
-                    })
-                  }
-                  overwriteNote={
-                    fifoNotesByUsername[account.username]?.overwriteNote ??
-                    false
-                  }
-                  onOverwriteNoteChange={(overwriteNote) =>
-                    updateFifoNote(account.username, { overwriteNote })
-                  }
-                  className="mt-2 w-full"
-                  inputClassName="h-8 w-full text-xs"
-                />
               </div>
             ))}
           </div>

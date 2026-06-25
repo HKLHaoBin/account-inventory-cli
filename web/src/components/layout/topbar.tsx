@@ -17,6 +17,7 @@ import {
   outboundByUsername,
   searchAccounts,
 } from "@/lib/api";
+import { ACCOUNT_SEARCH_PLACEHOLDER, searchSourceBadge } from "@/lib/account-columns";
 import { OutboundNoteField } from "@/components/notes/outbound-note-field";
 import { ClipboardCopyFallback } from "@/components/clipboard/clipboard-copy-fallback";
 import { OutboundCopyButton } from "@/components/outbound/outbound-copy-button";
@@ -39,6 +40,53 @@ function highlightMatch(text: string, query: string) {
       </mark>
       {text.slice(idx + query.length)}
     </>
+  );
+}
+
+function ResultSection({
+  title,
+  results,
+  query,
+  onSelect,
+}: {
+  title: string;
+  results: SearchResult[];
+  query: string;
+  onSelect: () => void;
+}) {
+  if (results.length === 0) return null;
+
+  return (
+    <div className="mb-2">
+      <p className="px-2 py-1 text-xs font-medium text-muted-foreground">
+        {title} ({results.length})
+      </p>
+      {results.map((r) => {
+        const badge = searchSourceBadge(r.source);
+        return (
+          <button
+            key={r.id}
+            type="button"
+            className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left text-sm transition-colors hover:bg-muted"
+            onClick={onSelect}
+          >
+            <span className="min-w-0">
+              <span className="block truncate">
+                {highlightMatch(r.account.username, query)}
+              </span>
+              {r.account.note?.trim() && (
+                <span className="block truncate text-xs text-muted-foreground">
+                  {r.account.note}
+                </span>
+              )}
+            </span>
+            <Badge variant={badge.variant} className="shrink-0">
+              {badge.label}
+            </Badge>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -128,8 +176,12 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
   }, [clearClipboard, onQuickOutbound]);
 
   const inventoryResults = results.filter((r) => r.source === "inventory");
-  const historyResults = results.filter((r) => r.source === "history");
-  const uniqueInventoryHit = inventoryResults.length === 1 && historyResults.length === 0;
+  const outboundResults = results.filter((r) => r.source === "outbound");
+  const inboundResults = results.filter((r) => r.source === "inbound");
+  const uniqueInventoryHit =
+    inventoryResults.length === 1 &&
+    outboundResults.length === 0 &&
+    inboundResults.length === 0;
   const uniqueHitUsername = uniqueInventoryHit
     ? inventoryResults[0]?.account.username ?? null
     : null;
@@ -199,6 +251,11 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
     await copy();
   }
 
+  const openSearchPage = () => {
+    router.push(`/search?q=${encodeURIComponent(query)}`);
+    setOpen(false);
+  };
+
   return (
     <header className="flex h-16 shrink-0 items-center gap-4 border-b border-border bg-card/80 px-6 backdrop-blur-sm">
       <div className="flex items-center gap-2 lg:hidden">
@@ -229,7 +286,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
-          placeholder="全局搜索账号… 按 / 聚焦"
+          placeholder={`${ACCOUNT_SEARCH_PLACEHOLDER} 按 / 聚焦`}
           className="pl-9 pr-9"
         />
         {query && (
@@ -267,70 +324,24 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
               </p>
             ) : (
               <div className="max-h-80 overflow-y-auto p-2">
-                {inventoryResults.length > 0 && (
-                  <div className="mb-2">
-                    <p className="px-2 py-1 text-xs font-medium text-muted-foreground">
-                      库存 ({inventoryResults.length})
-                    </p>
-                    {inventoryResults.map((r) => (
-                      <button
-                        key={r.id}
-                        type="button"
-                        className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left text-sm hover:bg-muted transition-colors"
-                        onClick={() => {
-                          router.push(`/search?q=${encodeURIComponent(query)}`);
-                          setOpen(false);
-                        }}
-                      >
-                        <span className="min-w-0">
-                          <span className="block truncate">
-                            {highlightMatch(r.account.username, query)}
-                          </span>
-                          {r.account.note?.trim() && (
-                            <span className="block truncate text-xs text-muted-foreground">
-                              {r.account.note}
-                            </span>
-                          )}
-                        </span>
-                        <Badge variant="inventory" className="shrink-0">
-                          库存
-                        </Badge>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {historyResults.length > 0 && (
-                  <div>
-                    <p className="px-2 py-1 text-xs font-medium text-muted-foreground">
-                      出库历史 ({historyResults.length})
-                    </p>
-                    {historyResults.map((r) => (
-                      <button
-                        key={r.id}
-                        type="button"
-                        className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left text-sm hover:bg-muted transition-colors"
-                        onClick={() => {
-                          router.push(`/search?q=${encodeURIComponent(query)}`);
-                          setOpen(false);
-                        }}
-                      >
-                        <span className="min-w-0">
-                          <span className="block truncate">
-                            {highlightMatch(r.account.username, query)}
-                          </span>
-                          {r.account.note?.trim() && (
-                            <span className="block truncate text-xs text-muted-foreground">
-                              {r.account.note}
-                            </span>
-                          )}
-                        </span>
-                        <Badge variant="history" className="shrink-0">
-                          历史
-                        </Badge>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <ResultSection
+                  title="库存"
+                  results={inventoryResults}
+                  query={query}
+                  onSelect={openSearchPage}
+                />
+                <ResultSection
+                  title="出库"
+                  results={outboundResults}
+                  query={query}
+                  onSelect={openSearchPage}
+                />
+                <ResultSection
+                  title="历史"
+                  results={inboundResults}
+                  query={query}
+                  onSelect={openSearchPage}
+                />
                 {uniqueInventoryHit && !outboundSuccess && (
                   <div className="mt-2 space-y-2 border-t border-border p-2">
                     <OutboundNoteField
@@ -384,10 +395,7 @@ export function TopBar({ onQuickOutbound }: TopBarProps) {
                 <button
                   type="button"
                   className="mt-1 w-full rounded-xl px-3 py-2 text-center text-xs text-primary hover:bg-primary/5"
-                  onClick={() => {
-                    router.push(`/search?q=${encodeURIComponent(query)}`);
-                    setOpen(false);
-                  }}
+                  onClick={openSearchPage}
                 >
                   查看全部结果 →
                 </button>

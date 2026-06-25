@@ -119,6 +119,8 @@ export interface ActivityItem {
   timestamp: string;
 }
 
+export type SearchSource = "all" | "inventory" | "outbound" | "inbound";
+
 export type SearchResult =
   | {
       id: string;
@@ -128,8 +130,14 @@ export type SearchResult =
     }
   | {
       id: string;
-      source: "history";
+      source: "outbound";
       account: OutboundRecord;
+      matchedField: string;
+    }
+  | {
+      id: string;
+      source: "inbound";
+      account: InboundRecord;
       matchedField: string;
     };
 
@@ -143,7 +151,23 @@ export interface PaginatedMeta {
 export interface SearchPayload extends PaginatedMeta {
   results: SearchResult[];
   inventoryTotal: number;
-  historyTotal: number;
+  outboundTotal: number;
+  inboundTotal: number;
+}
+
+export interface DatabaseGroup {
+  id: string;
+  name: string;
+  databaseIds: string[];
+}
+
+export interface DatabaseGroupsPayload {
+  groups: DatabaseGroup[];
+  databases: DatabaseInfo[];
+}
+
+export interface SaveDatabaseGroupsRequest {
+  groups: DatabaseGroup[];
 }
 
 export interface OutboundHistoryPayload extends PaginatedMeta {

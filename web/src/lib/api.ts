@@ -1,5 +1,7 @@
 import type {
   Account,
+  DatabaseGroup,
+  DatabaseGroupsPayload,
   DatabaseInfo,
   DatabaseListPayload,
   DashboardPayload,
@@ -25,6 +27,8 @@ import type {
   OutboundPasteRow,
   ReinboundFromHistoryPayload,
   SearchPayload,
+  SearchResult,
+  SearchSource,
   SeparatorRule,
   SeparatorRuleListPayload,
   UpdateStatusPayload,
@@ -132,6 +136,19 @@ export function fetchDashboard(): Promise<DashboardPayload> {
 
 export function fetchDatabases(): Promise<DatabaseListPayload> {
   return requestJson<DatabaseListPayload>("/api/databases");
+}
+
+export function fetchDatabaseGroups(): Promise<DatabaseGroupsPayload> {
+  return requestJson<DatabaseGroupsPayload>("/api/database-groups");
+}
+
+export function saveDatabaseGroups(
+  groups: DatabaseGroup[]
+): Promise<DatabaseGroupsPayload> {
+  return requestJson<DatabaseGroupsPayload>("/api/database-groups", {
+    method: "PUT",
+    body: JSON.stringify({ groups }),
+  });
 }
 
 export function createDatabase(name: string): Promise<DatabaseInfo> {
@@ -324,21 +341,63 @@ export function commitFifo(
   });
 }
 
+type LegacySearchPayload = SearchPayload & { historyTotal?: number };
+type LegacySearchResult = SearchResult | {
+  id: string;
+  source: "history";
+  account: OutboundRecord;
+  matchedField: string;
+};
+
+function normalizeSearchResult(result: LegacySearchResult): SearchResult {
+  if (result.source === "history") {
+    return {
+      id: result.id,
+      source: "outbound",
+      account: result.account,
+      matchedField: result.matchedField,
+    };
+  }
+  return result;
+}
+
+function normalizeSearchPayload(raw: LegacySearchPayload): SearchPayload {
+  return {
+    results: (raw.results ?? []).map((item) =>
+      normalizeSearchResult(item as LegacySearchResult)
+    ),
+    total: raw.total ?? 0,
+    page: raw.page ?? 1,
+    pageSize: raw.pageSize ?? DEFAULT_PAGE_SIZE,
+    totalPages: raw.totalPages ?? 0,
+    inventoryTotal: raw.inventoryTotal ?? 0,
+    outboundTotal: raw.outboundTotal ?? raw.historyTotal ?? 0,
+    inboundTotal: raw.inboundTotal ?? 0,
+  };
+}
+
+function toApiSearchSource(source: SearchSource): string {
+  return source;
+}
+
 export function searchAccounts(
   query: string,
   options: {
     page?: number;
     pageSize?: number;
-    source?: "all" | "inventory" | "history";
+    source?: SearchSource;
   } = {}
 ): Promise<SearchPayload> {
+  const source = options.source ?? "all";
   const path = buildPaginationQuery({
     q: query,
     page: options.page ?? 1,
     pageSize: options.pageSize ?? DEFAULT_PAGE_SIZE,
-    source: options.source ?? "all",
+    source: toApiSearchSource(source),
   });
-  return requestJson<SearchPayload>(`/api/search${path}`);
+  return requestJson<LegacySearchPayload>(`/api/search${path}`).then(
+    normalizeSearchPayload
+  );
 }
 
 export async function fetchOutboundHistory(

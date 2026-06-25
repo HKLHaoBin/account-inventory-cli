@@ -31,6 +31,12 @@ import {
   formatAccountLine,
   formatDateTime,
 } from "@/lib/utils";
+import {
+  ACCOUNT_SEARCH_PLACEHOLDER,
+  AccountColumnHeader,
+  AccountFieldCell,
+  INVENTORY_ACCOUNT_COLUMNS,
+} from "@/lib/account-columns";
 import type { Account } from "@/types/account";
 
 type SortKey = "inboundAt" | "username";
@@ -316,7 +322,7 @@ export default function InventoryPage() {
 
       <div className="flex flex-wrap items-center gap-3">
         <Input
-          placeholder="搜索库存"
+          placeholder={ACCOUNT_SEARCH_PLACEHOLDER}
           value={filter}
           onChange={(e) => {
             setPage(1);
@@ -404,12 +410,9 @@ export default function InventoryPage() {
                       </button>
                     </th>
                     <th className="px-4 py-3 text-left font-medium">账号</th>
-                    <th className="px-4 py-3 text-left font-medium">密码</th>
-                    <th className="px-4 py-3 text-left font-medium">邮箱</th>
-                    <th className="px-4 py-3 text-left font-medium">邮箱密码</th>
-                    <th className="px-4 py-3 text-left font-medium">网址</th>
-                    <th className="px-4 py-3 text-left font-medium">备注</th>
-                    <th className="px-4 py-3 text-left font-medium">入库时间</th>
+                    {INVENTORY_ACCOUNT_COLUMNS.slice(1).map((column) => (
+                      <AccountColumnHeader key={column.key} column={column} />
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -486,35 +489,28 @@ export default function InventoryPage() {
                           </div>
                         </td>
                         <td className={cn("px-4", rowPadding)}>
-                          <PasswordField value={account.password} />
+                          <AccountFieldCell
+                            column={INVENTORY_ACCOUNT_COLUMNS[1]}
+                            record={account}
+                          />
                         </td>
                         <td className={cn("px-4", rowPadding)}>
-                          {account.email ? (
-                            <PasswordField value={account.email} />
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
+                          <AccountFieldCell
+                            column={INVENTORY_ACCOUNT_COLUMNS[2]}
+                            record={account}
+                          />
                         </td>
                         <td className={cn("px-4", rowPadding)}>
-                          {account.emailPassword ? (
-                            <PasswordField value={account.emailPassword} />
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
+                          <AccountFieldCell
+                            column={INVENTORY_ACCOUNT_COLUMNS[3]}
+                            record={account}
+                          />
                         </td>
-                        <td
-                          className={cn(
-                            "px-4 max-w-[140px] truncate",
-                            rowPadding
-                          )}
-                        >
-                          {account.url ? (
-                            <span className="text-xs text-blue-600">
-                              {account.url}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
+                        <td className={cn("px-4", rowPadding)}>
+                          <AccountFieldCell
+                            column={INVENTORY_ACCOUNT_COLUMNS[4]}
+                            record={account}
+                          />
                         </td>
                         <td
                           className={cn(
@@ -522,7 +518,10 @@ export default function InventoryPage() {
                             rowPadding
                           )}
                         >
-                          {account.note?.trim() ? account.note : "—"}
+                          <AccountFieldCell
+                            column={INVENTORY_ACCOUNT_COLUMNS[5]}
+                            record={account}
+                          />
                         </td>
                         <td
                           className={cn(
@@ -530,7 +529,10 @@ export default function InventoryPage() {
                             rowPadding
                           )}
                         >
-                          {formatDateTime(account.inboundAt)}
+                          <AccountFieldCell
+                            column={INVENTORY_ACCOUNT_COLUMNS[6]}
+                            record={account}
+                          />
                         </td>
                       </tr>
                     );

@@ -172,8 +172,8 @@ class KlinePayload(BaseModel):
 
 class SearchResultPayload(BaseModel):
     id: str
-    source: Literal["inventory", "history"]
-    account: AccountPayload | OutboundRecordPayload
+    source: Literal["inventory", "outbound", "inbound"]
+    account: AccountPayload | OutboundRecordPayload | InboundRecordPayload
     matchedField: str
 
 
@@ -184,7 +184,8 @@ class SearchPayload(BaseModel):
     pageSize: int = DEFAULT_PAGE_SIZE
     totalPages: int = 0
     inventoryTotal: int = 0
-    historyTotal: int = 0
+    outboundTotal: int = 0
+    inboundTotal: int = 0
 
 
 class OutboundHistoryPayload(BaseModel):
@@ -243,6 +244,21 @@ class DatabaseInfoPayload(BaseModel):
 class DatabaseListPayload(BaseModel):
     databases: list[DatabaseInfoPayload]
     activeDatabaseId: str
+
+
+class DatabaseGroupPayload(BaseModel):
+    id: str
+    name: str
+    databaseIds: list[str]
+
+
+class DatabaseGroupsPayload(BaseModel):
+    groups: list[DatabaseGroupPayload]
+    databases: list[DatabaseInfoPayload]
+
+
+class SaveDatabaseGroupsRequest(BaseModel):
+    groups: list[DatabaseGroupPayload] = Field(default_factory=list)
 
 
 class DashboardPayload(BaseModel):
@@ -659,9 +675,9 @@ def _preview_rows_from_lines(lines: list[str]) -> list[InboundPreviewRow]:
         parsed_by_line[line] = parsed
         parsed_usernames.append(parsed[0])
 
-    inventory_exists = db.exists_in_inventory_many(parsed_usernames)
-    outbound_exists = db.exists_in_outbound_many(parsed_usernames)
-    outbound_times = db.get_latest_outbound_times(parsed_usernames)
+    inventory_exists = db.exists_in_inventory_many_for_group(parsed_usernames)
+    outbound_exists = db.exists_in_outbound_many_for_group(parsed_usernames)
+    outbound_times = db.get_latest_outbound_times_for_group(parsed_usernames)
     seen: set[str] = set()
     rows: list[InboundPreviewRow] = []
 
@@ -697,7 +713,7 @@ def _preview_rows_from_lines(lines: list[str]) -> list[InboundPreviewRow]:
                 InboundPreviewRow(
                     **base,
                     category="duplicate",
-                    reason=f"账号 {username} 已在库存中",
+                    reason=f"账号 {username} 已在组内库存中",
                 )
             )
             continue
@@ -802,6 +818,49 @@ def delete_database(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/database-groups", response_model=DatabaseGroupsPayload)
+def get_database_groups() -> DatabaseGroupsPayload:
+    return DatabaseGroupsPayload(
+        groups=[
+            DatabaseGroupPayload(
+                id=group["id"],
+                name=group["name"],
+                databaseIds=group["databaseIds"],
+            )
+            for group in db.list_database_groups()
+        ],
+        databases=[_database_payload(row) for row in db.list_database_info()],
+    )
+
+
+@app.put("/api/database-groups", response_model=DatabaseGroupsPayload)
+def put_database_groups(payload: SaveDatabaseGroupsRequest) -> DatabaseGroupsPayload:
+    try:
+        saved = db.save_database_groups(
+            [
+                {
+                    "id": group.id,
+                    "name": group.name,
+                    "databaseIds": group.databaseIds,
+                }
+                for group in payload.groups
+            ]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DatabaseGroupsPayload(
+        groups=[
+            DatabaseGroupPayload(
+                id=group["id"],
+                name=group["name"],
+                databaseIds=group["databaseIds"],
+            )
+            for group in saved
+        ],
+        databases=[_database_payload(row) for row in db.list_database_info()],
+    )
+
+
 @app.get("/api/separator-rules", response_model=SeparatorRuleListPayload)
 def get_separator_rules() -> SeparatorRuleListPayload:
     return SeparatorRuleListPayload(
@@ -882,11 +941,20 @@ def _search_result_inventory(row: dict, query: str) -> SearchResultPayload:
     )
 
 
-def _search_result_history(row: dict, query: str) -> SearchResultPayload:
+def _search_result_outbound(row: dict, query: str) -> SearchResultPayload:
     return SearchResultPayload(
-        id=f"hist-{row['id']}",
-        source="history",
+        id=f"out-{row['id']}",
+        source="outbound",
         account=_outbound_record_payload(row),
+        matchedField=_matched_field(row, query),
+    )
+
+
+def _search_result_inbound(row: dict, query: str) -> SearchResultPayload:
+    return SearchResultPayload(
+        id=f"in-{row['id']}",
+        source="inbound",
+        account=_inbound_record_payload(row),
         matchedField=_matched_field(row, query),
     )
 
@@ -896,10 +964,14 @@ def search_accounts(
     q: str = "",
     page: int = 1,
     page_size: int = Query(default=DEFAULT_PAGE_SIZE, alias="pageSize"),
-    source: Literal["all", "inventory", "history"] = "all",
+    source: Literal["all", "inventory", "outbound", "inbound", "history"] = "all",
 ) -> SearchPayload:
     query = q.strip()
     page, page_size, offset = _normalize_pagination(page, page_size)
+
+    # Legacy clients used source=history when search only covered outbound records.
+    # Map to "all" so responses include inventory, outbound, and inbound zones.
+    effective_source = "all" if source == "history" else source
 
     if not query:
         return SearchPayload(
@@ -909,13 +981,15 @@ def search_accounts(
             pageSize=page_size,
             totalPages=0,
             inventoryTotal=0,
-            historyTotal=0,
+            outboundTotal=0,
+            inboundTotal=0,
         )
 
     inventory_total = db.count_search_inventory(query)
-    history_total = db.count_search_outbound_history(query)
+    outbound_total = db.count_search_outbound_history(query)
+    inbound_total = db.count_search_inbound_history(query)
 
-    if source == "inventory":
+    if effective_source == "inventory":
         total = inventory_total
         rows = db.search_inventory(query, offset=offset, limit=page_size)
         results = [_search_result_inventory(row, query) for row in rows]
@@ -926,13 +1000,14 @@ def search_accounts(
             pageSize=page_size,
             totalPages=_total_pages(total, page_size),
             inventoryTotal=inventory_total,
-            historyTotal=history_total,
+            outboundTotal=outbound_total,
+            inboundTotal=inbound_total,
         )
 
-    if source == "history":
-        total = history_total
+    if effective_source == "outbound":
+        total = outbound_total
         rows = db.search_outbound_history(query, offset=offset, limit=page_size)
-        results = [_search_result_history(row, query) for row in rows]
+        results = [_search_result_outbound(row, query) for row in rows]
         return SearchPayload(
             results=results,
             total=total,
@@ -940,10 +1015,26 @@ def search_accounts(
             pageSize=page_size,
             totalPages=_total_pages(total, page_size),
             inventoryTotal=inventory_total,
-            historyTotal=history_total,
+            outboundTotal=outbound_total,
+            inboundTotal=inbound_total,
         )
 
-    total = inventory_total + history_total
+    if effective_source == "inbound":
+        total = inbound_total
+        rows = db.search_inbound_history(query, offset=offset, limit=page_size)
+        results = [_search_result_inbound(row, query) for row in rows]
+        return SearchPayload(
+            results=results,
+            total=total,
+            page=page,
+            pageSize=page_size,
+            totalPages=_total_pages(total, page_size),
+            inventoryTotal=inventory_total,
+            outboundTotal=outbound_total,
+            inboundTotal=inbound_total,
+        )
+
+    total = inventory_total + outbound_total + inbound_total
     results: list[SearchResultPayload] = []
     if offset < inventory_total:
         inventory_limit = min(page_size, inventory_total - offset)
@@ -955,14 +1046,26 @@ def search_accounts(
             results.append(_search_result_inventory(row, query))
 
     remaining = page_size - len(results)
-    if remaining > 0:
-        history_offset = max(0, offset - inventory_total)
+    outbound_offset = max(0, offset - inventory_total)
+    if remaining > 0 and outbound_offset < outbound_total:
+        outbound_limit = min(remaining, outbound_total - outbound_offset)
         for row in db.search_outbound_history(
             query,
-            offset=history_offset,
-            limit=remaining,
+            offset=outbound_offset,
+            limit=outbound_limit,
         ):
-            results.append(_search_result_history(row, query))
+            results.append(_search_result_outbound(row, query))
+
+    remaining = page_size - len(results)
+    inbound_offset = max(0, offset - inventory_total - outbound_total)
+    if remaining > 0 and inbound_offset < inbound_total:
+        inbound_limit = min(remaining, inbound_total - inbound_offset)
+        for row in db.search_inbound_history(
+            query,
+            offset=inbound_offset,
+            limit=inbound_limit,
+        ):
+            results.append(_search_result_inbound(row, query))
 
     return SearchPayload(
         results=results,
@@ -971,7 +1074,8 @@ def search_accounts(
         pageSize=page_size,
         totalPages=_total_pages(total, page_size),
         inventoryTotal=inventory_total,
-        historyTotal=history_total,
+        outboundTotal=outbound_total,
+        inboundTotal=inbound_total,
     )
 
 
@@ -1225,9 +1329,9 @@ def commit_inbound(payload: InboundCommitRequest) -> InboundCommitPayload:
         except ValueError:
             continue
 
-    inventory_exists = db.exists_in_inventory_many(parsed_usernames)
-    outbound_exists = db.exists_in_outbound_many(parsed_usernames)
-    outbound_times = db.get_latest_outbound_times(parsed_usernames)
+    inventory_exists = db.exists_in_inventory_many_for_group(parsed_usernames)
+    outbound_exists = db.exists_in_outbound_many_for_group(parsed_usernames)
+    outbound_times = db.get_latest_outbound_times_for_group(parsed_usernames)
     seen: set[str] = set()
     results: list[InboundCommitResultRow] = []
 
@@ -1258,7 +1362,7 @@ def commit_inbound(payload: InboundCommitRequest) -> InboundCommitPayload:
         }
 
         if username in inventory_exists:
-            message = f"账号 {username} 已在库存中"
+            message = f"账号 {username} 已在组内库存中"
             results.append(
                 InboundCommitResultRow(
                     **base,
