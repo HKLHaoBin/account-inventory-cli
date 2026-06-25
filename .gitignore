@@ -17,4 +17,4 @@ web/node_modules/
 web/.next/
 web/out/
 .updater.log
-.cursor/plans
+ci
