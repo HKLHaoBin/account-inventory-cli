@@ -41,6 +41,7 @@ import {
   updateSeparatorRule,
 } from "@/lib/api";
 import { emitDatabaseChanged, subscribeDatabaseChanged } from "@/lib/database-events";
+import { generateId } from "@/lib/id";
 import {
   fetchLocalConfig,
   saveLocalConfig,
@@ -277,7 +278,7 @@ export default function SettingsPage() {
     setDatabaseGroups((current) => [
       ...current,
       {
-        id: crypto.randomUUID(),
+        id: generateId(),
         name: `组 ${nextIndex}`,
         databaseIds: [],
       },
@@ -295,9 +296,23 @@ export default function SettingsPage() {
     setGroupsDirty(true);
   }
 
-  function deleteDatabaseGroup(groupId: string) {
-    setDatabaseGroups((current) => current.filter((group) => group.id !== groupId));
-    setGroupsDirty(true);
+  async function deleteDatabaseGroup(groupId: string) {
+    const nextGroups = databaseGroups.filter((group) => group.id !== groupId);
+    setDatabaseGroups(nextGroups);
+    setSavingGroups(true);
+    setGroupsError("");
+    try {
+      const payload = await saveDatabaseGroups(nextGroups);
+      setDatabaseGroups(payload.groups);
+      setGroupDatabases(payload.databases);
+      setGroupsDirty(false);
+      emitDatabaseChanged();
+    } catch (error) {
+      await refreshDatabaseGroups();
+      setGroupsError(error instanceof Error ? error.message : "数据库组删除失败");
+    } finally {
+      setSavingGroups(false);
+    }
   }
 
   function assignDatabaseToGroup(databaseId: string, groupId: string | null) {
@@ -965,10 +980,11 @@ export default function SettingsPage() {
                       variant="ghost"
                       size="sm"
                       className="text-destructive hover:text-destructive"
-                      onClick={() => deleteDatabaseGroup(group.id)}
+                      disabled={savingGroups}
+                      onClick={() => void deleteDatabaseGroup(group.id)}
                     >
                       <Trash2 className="h-4 w-4" />
-                      删除组
+                      {savingGroups ? "删除中…" : "删除组"}
                     </Button>
                   </div>
                   <div className="space-y-2">

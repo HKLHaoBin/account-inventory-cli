@@ -153,6 +153,39 @@ def test_cloud_proxy_forwards_request() -> None:
             assert forwarded_headers["x-remote-access-token"] == "remote-secret"
 
 
+def test_cloud_proxy_forwards_put_request() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        config_dir = Path(tmp)
+        with _patch_config_dir(config_dir):
+            cloud_config.save_config("https://cloud.example")
+
+            fake_response = httpx.Response(
+                200,
+                json={"groups": [], "databases": []},
+                headers={"content-type": "application/json"},
+            )
+            fake_client = mock.AsyncMock()
+            fake_client.request = mock.AsyncMock(return_value=fake_response)
+            fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
+            fake_client.__aexit__ = mock.AsyncMock(return_value=None)
+
+            from fastapi.testclient import TestClient
+
+            with mock.patch("cloud_app.httpx.AsyncClient", return_value=fake_client):
+                client = TestClient(cloud_app.app)
+                response = client.put(
+                    "/api/database-groups",
+                    json={"groups": [{"id": "g1", "name": "组 1", "databaseIds": []}]},
+                )
+
+            assert response.status_code == 200
+            assert response.json()["groups"] == []
+            fake_client.request.assert_awaited_once()
+            call = fake_client.request.await_args
+            assert call.args[0] == "PUT"
+            assert call.args[1] == "https://cloud.example/api/database-groups"
+
+
 def test_cloud_proxy_does_not_inject_token_when_unconfigured() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config_dir = Path(tmp)

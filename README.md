@@ -78,6 +78,23 @@ $env:REMOTE_ACCESS_TOKEN="your-access-token"; $env:HOST="0.0.0.0"; python app.py
 
 云模式本地客户端可在设置页的「远端访问令牌」中配置远端后端的令牌；代理请求远端 `/api/...` 时会自动注入该请求头，但不会在 `/local/config` 响应中回传明文令牌。
 
+### 云部署与反向代理
+
+若通过 Nginx、Caddy 等反向代理暴露 `app.py`（例如 `http://<公网 IP>:8000`），需确保 `/api/` 路径允许 **PUT**、**PATCH**、**DELETE** 等方法透传到后端。设置页保存/删除数据库组会调用 `PUT /api/database-groups`；若代理仅放行 GET/POST，将返回 **405 Method Not Allowed**。
+
+Nginx 示例（勿对 `/api/` 使用 `limit_except GET POST;`）：
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+Cloud 本地客户端（`account-inventory-cloud.exe`）会将 `/api/...` 代理到远端后端，同样依赖上述 HTTP 方法可用。
+
 ## 使用说明
 
 启动后进入交互菜单：

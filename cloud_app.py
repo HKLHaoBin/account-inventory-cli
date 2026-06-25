@@ -185,7 +185,7 @@ async def clipboard_socket(websocket: WebSocket) -> None:
 
 @app.api_route(
     "/api/{path:path}",
-    methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def proxy_api(request: Request, path: str) -> Response:
     config = load_config()
